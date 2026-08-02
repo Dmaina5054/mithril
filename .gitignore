@@ -17,6 +17,8 @@ ebpf/*.o
 ebpf/*.ll
 proxy/ebpf/**/*_bpfel.go
 proxy/ebpf/**/*_bpfeb.go
+proxy/ebpf/**/*_bpfel.o
+proxy/ebpf/**/*_bpfeb.o
 
 # Go module — go.sum is committed (lockfile)
 # vendor/ should not exist if using module mode

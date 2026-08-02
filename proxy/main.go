@@ -4,20 +4,33 @@
 //
 // Phase 3: one listener per profiles.yaml entry, each backed by a
 // Router that applies routing.yaml's geo/session rules per-request.
-// Replaces Phase 2's single StaticResolver.
+// Phase 5: sock_ops eBPF program (per-process bandwidth accounting),
+// loaded on startup and unloaded on graceful shutdown per spec section 4.
+// eBPF failure is non-fatal — the core SOCKS5 proxy keeps running
+// without it (e.g. missing CAP_BPF, kernel too old); a bandwidth
+// accounting gap shouldn't take down request forwarding.
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net"
 	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
 	"github.com/dmaina5054/mithril/proxy/config"
+	"github.com/dmaina5054/mithril/proxy/ebpf/sockops"
+	"github.com/dmaina5054/mithril/proxy/internal/metrics"
 	"github.com/dmaina5054/mithril/proxy/internal/proxy"
 )
 
 func main() {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	routingPath := envOrDefault("MITHRIL_ROUTING_CONFIG", "/etc/socks5-proxy/routing.yaml")
 	profilesPath := envOrDefault("MITHRIL_PROFILES_CONFIG", "/etc/socks5-proxy/profiles.yaml")
 	// Fixed entry node for now — Phase 1's EntryNodes() benchmarking
@@ -38,6 +51,8 @@ func main() {
 	if err != nil {
 		log.Fatalf("mithril-proxy: %v", err)
 	}
+
+	startEBPF(ctx)
 
 	sessions := proxy.NewSessionStore() // shared across profiles — session keys are profile-username-prefixed, no collision risk
 
@@ -68,9 +83,61 @@ func main() {
 		log.Fatal("mithril-proxy: no profiles started")
 	}
 
-	// Any single listener returning ends the process — matches Phase 2's
-	// behavior (no partial-degraded-mode handling yet).
-	log.Fatal(<-errCh)
+	// Any single listener returning, or a shutdown signal, ends the
+	// process. Listener errors still exit immediately (no partial-
+	// degraded-mode handling yet) — only the signal path unwinds via
+	// ctx cancellation, which startEBPF's cleanup goroutine also waits on.
+	select {
+	case err := <-errCh:
+		log.Fatal(err)
+	case <-ctx.Done():
+		log.Print("mithril-proxy: shutdown signal received, exiting")
+	}
+}
+
+// startEBPF loads and attaches the sock_ops program to the root cgroup
+// (host-wide per-process accounting, per spec) and starts the :9435
+// exporter. Logs and returns on any failure — never fatal, per this
+// file's top comment. NOT LIVE-VERIFIED: loading/attaching requires
+// root/CAP_BPF this author doesn't have; the eBPF C program compiles
+// and the Go-side map reading/metrics logic is unit tested, but the
+// actual kernel behavior (especially PID attribution on passive/inbound
+// connections — see ebpf/sockops/sockops.c's handle_established doc
+// comment) needs real privileged verification.
+func startEBPF(ctx context.Context) {
+	const cgroupRoot = "/sys/fs/cgroup"
+	const ebpfExporterAddr = "127.0.0.1:9435"
+	const readInterval = 5 * time.Second // spec: "Go reads map every 5s"
+
+	tracker, err := sockops.Load()
+	if err != nil {
+		log.Printf("mithril-proxy: eBPF sock_ops disabled (per-process bandwidth accounting unavailable): %v", err)
+		return
+	}
+
+	if err := tracker.AttachCgroup(cgroupRoot); err != nil {
+		log.Printf("mithril-proxy: eBPF sock_ops disabled (cgroup attach failed): %v", err)
+		tracker.Close()
+		return
+	}
+
+	log.Printf("mithril-proxy: eBPF sock_ops attached to %s", cgroupRoot)
+
+	go metrics.RunEBPFExporter(ctx, tracker, readInterval)
+	go func() {
+		if err := metrics.ServeEBPFMetrics(ebpfExporterAddr); err != nil {
+			log.Printf("mithril-proxy: ebpf-exporter server stopped: %v", err)
+		}
+	}()
+
+	go func() {
+		<-ctx.Done()
+		if err := tracker.Close(); err != nil {
+			log.Printf("mithril-proxy: eBPF cleanup error: %v", err)
+		} else {
+			log.Print("mithril-proxy: eBPF sock_ops unloaded")
+		}
+	}()
 }
 
 func envOrDefault(key, def string) string {
