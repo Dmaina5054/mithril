@@ -2,6 +2,8 @@ package sockops
 
 import (
 	"fmt"
+	"os"
+	"strings"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
@@ -9,9 +11,10 @@ import (
 
 // Tracker owns the loaded eBPF program/maps and the cgroup attachment.
 // LOADING AND ATTACHING REQUIRE ROOT/CAP_BPF — this package compiles and
-// its non-privileged pieces (struct layout, map key encoding) are unit
-// tested, but Load/Attach themselves have not been run against a live
-// kernel by this author; that needs verification with real privileges.
+// its non-privileged pieces (map key encoding, /proc comm resolution)
+// are unit tested, but Load/Attach's actual kernel behavior has only
+// been verified via a live privileged run by Gandalf, not by this
+// author directly.
 type Tracker struct {
 	objs mithrilSockopsObjects
 	link link.Link
@@ -45,8 +48,25 @@ func (t *Tracker) AttachCgroup(cgroupPath string) error {
 	return nil
 }
 
-// ProcessKey identifies one process for bandwidth accounting — the Go-
-// native form of the eBPF map's struct proc_key.
+// ProcessKey identifies one process for bandwidth accounting.
+//
+// Comm is resolved here in Go, via /proc/<pid>/comm, NOT captured in
+// the eBPF program: the kernel verifier rejects bpf_get_current_comm()
+// (helper #16) for BPF_PROG_TYPE_SOCK_OPS on this kernel (6.12.95+deb13)
+// — "invalid argument: program of this type cannot use helper
+// bpf_get_current_comm#16", confirmed via a real privileged load
+// attempt. bpf_get_current_pid_tgid() is fine, so the eBPF map is keyed
+// by plain PID; this resolution step fills in the process name.
+//
+// Known tradeoff, not resolved: resolution happens at READ time (up to
+// readInterval after the byte counts were actually recorded), not at
+// connect time. If a short-lived process exits and its PID gets reused
+// by an unrelated process before the next read, the reused process's
+// name would be (incorrectly) attributed to the original process's
+// bytes. Accepted as a rare edge case rather than engineering around it
+// — the alternative (caching PID->comm at connect time in Go, which
+// would require plumbing connect events out of the kernel some other
+// way) is real added complexity for a narrow window of risk.
 type ProcessKey struct {
 	PID  uint32
 	Comm string
@@ -59,20 +79,21 @@ type ProcessBytes struct {
 	BytesRecv uint64
 }
 
-// ReadProcessBytes snapshots the process_bytes map. Safe to call
-// concurrently with the eBPF program still running (map reads don't
-// need to pause it) but not safe for concurrent calls to ReadProcessBytes
-// itself on the same Tracker without external synchronization — callers
-// (internal/metrics) use a single ticker goroutine, so this hasn't come
-// up, but it's not a mutex-protected type.
+// ReadProcessBytes snapshots the process_bytes map, resolving each PID's
+// comm via /proc. Safe to call concurrently with the eBPF program still
+// running (map reads don't need to pause it) but not safe for
+// concurrent calls to ReadProcessBytes itself on the same Tracker
+// without external synchronization — callers (internal/metrics) use a
+// single ticker goroutine, so this hasn't come up, but it's not a
+// mutex-protected type.
 func (t *Tracker) ReadProcessBytes() (map[ProcessKey]ProcessBytes, error) {
 	out := make(map[ProcessKey]ProcessBytes)
 
-	var key mithrilSockopsProcKey
+	var pid uint32
 	var val mithrilSockopsProcBytes
 	iter := t.objs.mithrilSockopsMaps.ProcessBytes.Iterate()
-	for iter.Next(&key, &val) {
-		out[ProcessKey{PID: key.Pid, Comm: commToString(key.Comm)}] = ProcessBytes{
+	for iter.Next(&pid, &val) {
+		out[ProcessKey{PID: pid, Comm: resolveComm(pid)}] = ProcessBytes{
 			BytesSent: val.BytesSent,
 			BytesRecv: val.BytesRecv,
 		}
@@ -100,16 +121,13 @@ func (t *Tracker) Close() error {
 	return nil
 }
 
-// commToString converts the kernel's fixed-size, NUL-padded comm buffer
-// (bpf2go generates [16]int8 for the C `char comm[16]`) into a clean Go
-// string.
-func commToString(comm [16]int8) string {
-	b := make([]byte, 0, 16)
-	for _, c := range comm {
-		if c == 0 {
-			break
-		}
-		b = append(b, byte(c))
+// resolveComm reads /proc/<pid>/comm. Falls back to "pid-<N>" if the
+// process has already exited by read time (ESRCH/ENOENT) — a labeled,
+// visible fallback rather than silently dropping the data or panicking.
+func resolveComm(pid uint32) string {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/comm", pid))
+	if err != nil {
+		return fmt.Sprintf("pid-%d", pid)
 	}
-	return string(b)
+	return strings.TrimSpace(string(data))
 }

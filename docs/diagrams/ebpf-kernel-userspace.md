@@ -23,7 +23,7 @@ flowchart TB
 
     subgraph maps["BPF Maps"]
         M_ESTAB["established_sockets\nHASH, per-socket 4-tuple\n(internal bookkeeping only)"]
-        M_PROC["process_bytes\nHASH, key={pid,comm}\nvalue={bytes_sent,bytes_recv}"]
+        M_PROC["process_bytes\nHASH, key=pid (u32)\nvalue={bytes_sent,bytes_recv}"]
         M_PIDS["proxy_required_pids\nHASH (planned)"]
         RB_SNI["perf ring buffer (planned)\n{conn_id, sni, flow_type}"]
         M_ZFS["zfs_io_snapshot\nARRAY, 1 entry (planned)"]
@@ -63,9 +63,20 @@ flowchart TB
   overhead, per spec's own resource-cost note.
 - `established_sockets` is **not** read by Go at all — it's purely
   kernel-internal bookkeeping the eBPF program uses to correlate later
-  callbacks (RTT_CB, STATE_CB) back to the PID/comm captured at
+  callbacks (RTT_CB, STATE_CB) back to the PID captured at
   connect/accept time. Only `process_bytes` crosses into userspace.
-- **Known unresolved uncertainty, not glossed over**: PID/comm capture
+- **Real correction, confirmed live**: the sock_ops program originally
+  also called `bpf_get_current_comm()` in-kernel, alongside PID, keying
+  `process_bytes` by `{pid, comm}`. The kernel verifier rejects that
+  helper for `BPF_PROG_TYPE_SOCK_OPS` on this kernel (6.12.95+deb13) —
+  confirmed via a real privileged load attempt, not a compile-time
+  issue. `process_bytes` is now keyed by plain PID; comm is resolved in
+  Go via `/proc/<pid>/comm` at read time (`ebpf/sockops/loader.go`).
+  Tradeoff: if a short-lived process exits and its PID is reused before
+  the next 5s read, the wrong (reused) process's name could be
+  attributed — accepted as a rare edge case rather than engineered
+  around.
+- **Known unresolved uncertainty, not glossed over**: PID capture
   for *passive* (inbound/accepted) connections happens at
   `BPF_SOCK_OPS_PASSIVE_ESTABLISHED_CB`, which may not run in the
   accepting process's context (a kernel/softirq event, not a syscall).

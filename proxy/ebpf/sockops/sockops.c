@@ -23,24 +23,29 @@ struct sk_key {
 	u32 remote_port;
 };
 
-// pid/comm captured once per socket, plus the last-seen cumulative
-// byte counters so later callbacks can compute a delta instead of
+// pid captured once per socket, plus the last-seen cumulative byte
+// counters so later callbacks can compute a delta instead of
 // overwriting (a process can have many concurrent sockets, and we need
 // to SUM their contributions, not let the latest one clobber the rest).
+//
+// No comm here — bpf_get_current_comm() (helper #16) is rejected by the
+// verifier for BPF_PROG_TYPE_SOCK_OPS on this kernel (6.12.95+deb13):
+// "invalid argument: program of this type cannot use helper
+// bpf_get_current_comm#16". Confirmed via a real privileged load
+// attempt, not assumed. bpf_get_current_pid_tgid() is fine. PID -> comm
+// resolution now happens in Go userspace via /proc/<pid>/comm
+// (ebpf/sockops/loader.go) — also avoids wasting map space on a fixed
+// 16-byte truncated string per socket.
 struct sk_owner {
 	u32 pid;
-	char comm[16];
 	u64 last_bytes_acked;
 	u64 last_bytes_received;
 };
 
-struct proc_key {
-	u32 pid;
-	char comm[16];
-};
-
 // This is the map named in the infra spec (section 4, eBPF Feature 3) —
-// internal/ebpf's Go loader reads this one directly.
+// keyed by plain PID now (see sk_owner's comment above for why comm
+// isn't captured here). internal/ebpf's Go loader reads this map
+// directly and resolves PID -> comm itself.
 struct proc_bytes {
 	u64 bytes_sent; // cumulative skops->bytes_acked deltas
 	u64 bytes_recv; // cumulative skops->bytes_received deltas
@@ -56,7 +61,7 @@ struct {
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
 	__uint(max_entries, MAX_TRACKED_PROCESSES);
-	__type(key, struct proc_key);
+	__type(key, u32); // pid
 	__type(value, struct proc_bytes);
 } process_bytes SEC(".maps");
 
@@ -68,9 +73,9 @@ static inline void init_sk_key(struct bpf_sock_ops *skops, struct sk_key *key) {
 }
 
 // Records which process owns this socket. Only safe to trust
-// bpf_get_current_pid_tgid()/bpf_get_current_comm() here because these
-// two callbacks are the ones sock_ops fires in (or very close to) the
-// owning process's syscall context:
+// bpf_get_current_pid_tgid() here because these two callbacks are the
+// ones sock_ops fires in (or very close to) the owning process's
+// syscall context:
 //
 //   - BPF_SOCK_OPS_TCP_CONNECT_CB fires synchronously inside connect(),
 //     in the calling process — reliable for outbound connections (the
@@ -95,7 +100,6 @@ static inline void handle_established(struct bpf_sock_ops *skops) {
 
 	struct sk_owner owner = {};
 	owner.pid = bpf_get_current_pid_tgid() >> 32;
-	bpf_get_current_comm(&owner.comm, sizeof(owner.comm));
 	owner.last_bytes_acked = 0;
 	owner.last_bytes_received = 0;
 
@@ -125,17 +129,14 @@ static inline void flush_bytes(struct bpf_sock_ops *skops) {
 	if (sent_delta == 0 && recv_delta == 0)
 		return;
 
-	struct proc_key pkey = {};
-	pkey.pid = owner->pid;
-	__builtin_memcpy(pkey.comm, owner->comm, sizeof(pkey.comm));
-
-	struct proc_bytes *bytes = bpf_map_lookup_elem(&process_bytes, &pkey);
+	u32 pid = owner->pid;
+	struct proc_bytes *bytes = bpf_map_lookup_elem(&process_bytes, &pid);
 	if (bytes) {
 		__sync_fetch_and_add(&bytes->bytes_sent, sent_delta);
 		__sync_fetch_and_add(&bytes->bytes_recv, recv_delta);
 	} else {
 		struct proc_bytes fresh = { .bytes_sent = sent_delta, .bytes_recv = recv_delta };
-		bpf_map_update_elem(&process_bytes, &pkey, &fresh, BPF_NOEXIST);
+		bpf_map_update_elem(&process_bytes, &pid, &fresh, BPF_NOEXIST);
 	}
 }
 

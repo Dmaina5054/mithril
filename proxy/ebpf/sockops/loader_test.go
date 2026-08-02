@@ -1,45 +1,34 @@
 package sockops
 
 import (
+	"fmt"
 	"os"
+	"strings"
 	"testing"
 )
 
-func TestCommToString(t *testing.T) {
-	cases := []struct {
-		name string
-		in   [16]int8
-		want string
-	}{
-		{
-			name: "full 16 bytes, no terminator",
-			in:   [16]int8{'c', 'o', 'm', 'f', 'y', 'u', 'i', '-', 'w', 'o', 'r', 'k', 'e', 'r', '0', '1'},
-			want: "comfyui-worker01",
-		},
-		{
-			name: "early null terminator",
-			in:   [16]int8{'n', 'o', 'd', 'e', '_', 'e', 'x', 'p', 'o', 'r', 't', 'e', 'r', 0, 0, 0},
-			want: "node_exporter",
-		},
-		{
-			name: "empty",
-			in:   [16]int8{},
-			want: "",
-		},
-		{
-			name: "single char",
-			in:   [16]int8{'x', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
-			want: "x",
-		},
+func TestResolveComm_OwnPID(t *testing.T) {
+	// Self-referential rather than asserting an exact expected string
+	// (the test binary's own comm name isn't something worth hardcoding
+	// and re-deriving here) — just confirms a real, currently-running
+	// PID resolves to a real, non-empty, non-fallback name.
+	got := resolveComm(uint32(os.Getpid()))
+	if got == "" {
+		t.Fatal("resolveComm(own pid) returned empty")
 	}
+	if strings.HasPrefix(got, "pid-") {
+		t.Errorf("resolveComm(own pid) = %q, looks like the not-found fallback for a PID that definitely exists", got)
+	}
+}
 
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got := commToString(tc.in)
-			if got != tc.want {
-				t.Errorf("commToString(%v) = %q, want %q", tc.in, got, tc.want)
-			}
-		})
+func TestResolveComm_NonexistentPID_FallsBackGracefully(t *testing.T) {
+	// PID 1 always exists (init/systemd) so isn't a safe "doesn't exist"
+	// probe; use a PID far outside any realistic range instead.
+	const bogusPID = uint32(4_000_000_000)
+	got := resolveComm(bogusPID)
+	want := fmt.Sprintf("pid-%d", bogusPID)
+	if got != want {
+		t.Errorf("resolveComm(nonexistent pid) = %q, want %q (the documented fallback)", got, want)
 	}
 }
 
