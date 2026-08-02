@@ -209,7 +209,23 @@ static __always_inline int try_parse_sni(void *data, void *data_end, char *sni_o
 SEC("socket")
 int mithril_snifilter(struct __sk_buff *skb) {
 	void *data = (void *)(long)skb->data;
-	void *data_end = (void *)(long)skb->data_end;
+	// Not skb->data_end directly — per Gandalf's live verifier testing,
+	// this kernel (6.12.95+deb13) rejects reading data_end for a
+	// socket_filter attached to a connected TCP socket (SO_ATTACH_BPF),
+	// even though the offset itself (verified via disassembly) is
+	// correct and even though the kernel's own canonical sample,
+	// samples/bpf/sockex1_kern.c, reads data_end fine for the SAME
+	// program type — but that sample attaches to an AF_PACKET raw
+	// socket, a different attachment style with apparently different
+	// context field permissions. skb->len (offset 0, always permitted)
+	// gives an equivalent bound: data + len == data_end for the common
+	// case of linear TCP payload data reaching this filter. NOT
+	// necessarily exact for non-linear/paged skbs — the per-byte bounds
+	// checks throughout this file still apply against whatever this
+	// computes, so a slightly-wrong bound here doesn't defeat those,
+	// but this specific assumption (like the offset one before it)
+	// needs live confirmation, not just "the verifier accepted it."
+	void *data_end = data + skb->len;
 
 	u64 cookie = bpf_get_socket_cookie(skb);
 	if (cookie == 0)
