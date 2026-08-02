@@ -2,11 +2,9 @@
 // residential proxies, built out phase-by-phase per docs/mithril-infra-spec.docx
 // Session B.
 //
-// Phase 2 wiring only: a single static upstream/credential pair, no
-// geo/session routing yet (that's Phase 3 — StaticResolver gets swapped
-// for the real router without touching internal/proxy). Sufficient to
-// prove the SOCKS5 core end-to-end: curl --socks5 through this binary
-// should come back with a residential IP.
+// Phase 3: one listener per profiles.yaml entry, each backed by a
+// Router that applies routing.yaml's geo/session rules per-request.
+// Replaces Phase 2's single StaticResolver.
 package main
 
 import (
@@ -15,45 +13,64 @@ import (
 	"net"
 	"os"
 
+	"github.com/dmaina5054/mithril/proxy/config"
 	"github.com/dmaina5054/mithril/proxy/internal/proxy"
 )
 
 func main() {
-	listenAddr := envOrDefault("MITHRIL_LISTEN_ADDR", "127.0.0.1:1080")
+	routingPath := envOrDefault("MITHRIL_ROUTING_CONFIG", "/etc/socks5-proxy/routing.yaml")
+	profilesPath := envOrDefault("MITHRIL_PROFILES_CONFIG", "/etc/socks5-proxy/profiles.yaml")
+	// Fixed entry node for now — Phase 1's EntryNodes() benchmarking
+	// isn't wired into automatic startup/6h re-selection yet. Follow-up,
+	// not part of Phase 3's gate (routing.yaml pattern matching).
 	upstreamAddr := os.Getenv("MITHRIL_UPSTREAM_ADDR")
-	upstreamUser := os.Getenv("MITHRIL_UPSTREAM_USER")
-	upstreamPass := os.Getenv("MITHRIL_UPSTREAM_PASS")
 
-	if upstreamAddr == "" || upstreamUser == "" || upstreamPass == "" {
-		fmt.Fprintln(os.Stderr, `mithril-proxy: Phase 2 needs MITHRIL_UPSTREAM_ADDR, MITHRIL_UPSTREAM_USER, MITHRIL_UPSTREAM_PASS set.
-
-MITHRIL_UPSTREAM_ADDR is an IPRoyal entry node host:port (from GET
-/access/entry-nodes — see cmd/apismoke output, or the IPRoyal dashboard).
-MITHRIL_UPSTREAM_USER/PASS is the kioo-labs sub-user credential string
-(see AI-03 — sub-user #89998755, username "kioolabs").
-
-This is intentionally not hardcoded — no verified entry-node address is
-known yet. Phase 3 replaces this with the real geo/session router.`)
+	if upstreamAddr == "" {
+		fmt.Fprintln(os.Stderr, "mithril-proxy: MITHRIL_UPSTREAM_ADDR must be set (an IPRoyal entry node host:port — automatic selection isn't wired up yet)")
 		os.Exit(1)
 	}
 
-	resolver := proxy.StaticResolver{
-		UpstreamAddr: upstreamAddr,
-		Creds: proxy.Credentials{
-			Username: upstreamUser,
-			Password: upstreamPass,
-		},
-	}
-
-	ln, err := net.Listen("tcp", listenAddr)
+	routing, err := config.LoadRoutingConfig(routingPath)
 	if err != nil {
-		log.Fatalf("mithril-proxy: listen on %s: %v", listenAddr, err)
-	}
-	log.Printf("mithril-proxy: listening on %s, upstream %s (Phase 2 static resolver)", listenAddr, upstreamAddr)
-
-	if err := proxy.Serve(ln, resolver); err != nil {
 		log.Fatalf("mithril-proxy: %v", err)
 	}
+	profiles, err := config.LoadProfilesConfig(profilesPath)
+	if err != nil {
+		log.Fatalf("mithril-proxy: %v", err)
+	}
+
+	sessions := proxy.NewSessionStore() // shared across profiles — session keys are profile-username-prefixed, no collision risk
+
+	errCh := make(chan error, len(profiles.Profiles))
+	started := 0
+	for name, p := range profiles.Profiles {
+		listenAddr := fmt.Sprintf("127.0.0.1:%d", p.ListenPort)
+		ln, err := net.Listen("tcp", listenAddr)
+		if err != nil {
+			log.Fatalf("mithril-proxy: profile %q: listen on %s: %v", name, listenAddr, err)
+		}
+
+		router := &proxy.Router{
+			Profile:      p,
+			Routing:      routing,
+			UpstreamAddr: upstreamAddr,
+			Sessions:     sessions,
+		}
+
+		log.Printf("mithril-proxy: profile %q listening on %s, upstream %s", name, listenAddr, upstreamAddr)
+		started++
+		go func(ln net.Listener, router *proxy.Router) {
+			errCh <- proxy.Serve(ln, router)
+		}(ln, router)
+	}
+
+	if started == 0 {
+		log.Fatal("mithril-proxy: no profiles started")
+	}
+
+	// Any single listener returning ends the process — matches Phase 2's
+	// behavior (no partial-degraded-mode handling yet).
+	log.Fatal(<-errCh)
 }
 
 func envOrDefault(key, def string) string {

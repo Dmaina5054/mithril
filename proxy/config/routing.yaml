@@ -1,0 +1,20 @@
+# /etc/socks5-proxy/routing.yaml (deployed copy) — this is the tracked
+# default. Patterns are illustrative examples per spec section 3
+# ("Geo Routing... Session Management") — replace with real Kioo Labs
+# / shire-forge destination hostnames as they're known.
+#
+# session: sticky needs a lifetime IPRoyal will accept (1s-7d, single
+# unit — e.g. "2h", "30m"). session: rotating needs neither.
+rules:
+  - pattern: "*.comfy.example.com"
+    country: "us"
+    session: sticky
+    lifetime: 2h # spec: "Sticky sessions for image jobs (2h)"
+
+  - pattern: "*.scrape.example.com"
+    country: "us"
+    session: rotating # spec: "rotating for scraping"
+
+default:
+  country: "us"
+  session: rotating

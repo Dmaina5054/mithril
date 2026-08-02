@@ -1,5 +1,6 @@
 # Secrets
 .env
+proxy/config/profiles.yaml
 
 # Claude Code working directory
 .claude/

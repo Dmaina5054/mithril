@@ -1,0 +1,20 @@
+# Copy to profiles.yaml (gitignored — real passwords go here, never
+# commit) or to /etc/socks5-proxy/profiles.yaml on the deployed host.
+#
+# Format per infra spec section 7. Password is the base IPRoyal sub-user
+# password — internal/proxy.BuildPassword appends the per-request
+# geo/session suffix on top of it at connection time; the base password
+# alone is never sent upstream as-is.
+profiles:
+  default:
+    username: "<default-subuser-username>"
+    password: "<default-subuser-password>"
+    listen_port: 1080
+    bandwidth_alert_gb: 1
+
+  kioo-labs:
+    subuser_hash: "<from IPRoyal dashboard, sub-user #89998755>"
+    username: "kioolabs" # exact IPRoyal string — no hyphen, see AI-03
+    password: "<kioolabs sub-user password>"
+    listen_port: 1081
+    bandwidth_alert_gb: 0.5
