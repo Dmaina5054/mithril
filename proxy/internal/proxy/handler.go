@@ -59,9 +59,10 @@ func (s StaticResolver) Resolve(_ Target) (string, Credentials, error) {
 // can shorten it.
 var DialTimeout = 15 * time.Second
 
-// Handle services one accepted local connection end-to-end: server-side
-// SOCKS5 handshake, resolve the upstream, dial+auth upstream, reply to
-// the local client, then relay bytes until either side closes.
+// Handle services one accepted local SOCKS5 connection end-to-end:
+// server-side SOCKS5 handshake, resolve the upstream, dial+auth
+// upstream, reply to the local client, then relay bytes until either
+// side closes.
 func Handle(conn net.Conn, resolver Resolver) {
 	target, err := ServerHandshake(conn)
 	if err != nil {
@@ -94,7 +95,43 @@ func Handle(conn net.Conn, resolver Resolver) {
 	}
 
 	log.Printf("mithril-proxy: connected %s -> %s via %s", conn.RemoteAddr(), target.Addr(), upstreamAddr)
+	attachSNIAndRelay(conn, upstream, target)
+}
 
+// HandleTransparent services one connection redirected by the eBPF
+// Feature 1 connect4 hook (Session B Phase 7) — the connecting process
+// never spoke SOCKS5 and doesn't know it's been redirected, so there's
+// no handshake to perform and no protocol-level reply to send; target
+// is already known (recovered by the caller via
+// redirect.Tracker.LookupOriginalDest) rather than parsed from the
+// connection itself. Everything after "target is known" — resolve,
+// dial, eBPF/Go SNI, relay — is identical to the SOCKS5 path, hence
+// sharing attachSNIAndRelay rather than duplicating it.
+func HandleTransparent(conn net.Conn, target Target, resolver Resolver) {
+	upstreamAddr, creds, err := resolver.Resolve(target)
+	if err != nil {
+		log.Printf("mithril-proxy: (transparent) resolve error for %s: %v", target.Addr(), err)
+		conn.Close()
+		return
+	}
+
+	upstream, err := DialUpstream(upstreamAddr, creds, target, DialTimeout)
+	if err != nil {
+		log.Printf("mithril-proxy: (transparent) upstream dial error for %s via %s: %v", target.Addr(), upstreamAddr, err)
+		conn.Close()
+		return
+	}
+
+	log.Printf("mithril-proxy: (transparent) connected %s -> %s via %s", conn.RemoteAddr(), target.Addr(), upstreamAddr)
+	attachSNIAndRelay(conn, upstream, target)
+}
+
+// attachSNIAndRelay is the shared tail end of both Handle and
+// HandleTransparent: attach the eBPF SNI filter, do the Go SNI peek,
+// then relay until either side closes. Requires only that upstream is
+// already dialed and conn is ready to have application data flow
+// through it (SOCKS5's reply already sent, if applicable).
+func attachSNIAndRelay(conn net.Conn, upstream net.Conn, target Target) {
 	// eBPF SNI socket filter (Feature 2): attach if loaded. Only TCP
 	// connections implement syscall.Conn in a way link.AttachSocketFilter
 	// accepts — true for everything this proxy accepts, but checked

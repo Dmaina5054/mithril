@@ -11,9 +11,18 @@
 // results are read from a ring buffer by one long-lived goroutine here
 // and logged, per spec ("Go reads perf buffer, enriches proxy
 // connection log") — independent of any single connection's lifecycle.
-// eBPF failure is non-fatal for both — the core SOCKS5 proxy keeps
-// running without them (e.g. missing CAP_BPF, kernel too old); an
-// observability gap shouldn't take down request forwarding.
+// Phase 7: traffic interception enforcement — NOT spec's literal
+// tc+iptables/nftables TPROXY mechanism (see ebpf/redirect/redirect.c's
+// top comment for why, and the explicit user sign-off before building
+// it that way). A BPF_CGROUP_INET4_CONNECT hook redirects configured
+// PIDs' outbound connections to a transparent listener here, which
+// recovers the true destination via an eBPF-populated correlation map
+// and relays through the matching profile — same Resolver/DialUpstream/
+// Relay pipeline the SOCKS5 path uses, just without a SOCKS5 handshake.
+// eBPF failure is non-fatal for all three eBPF features — the core
+// SOCKS5 proxy keeps running without them (e.g. missing CAP_BPF, kernel
+// too old); an observability or enforcement gap shouldn't take down
+// request forwarding.
 package main
 
 import (
@@ -27,6 +36,7 @@ import (
 	"time"
 
 	"github.com/dmaina5054/mithril/proxy/config"
+	"github.com/dmaina5054/mithril/proxy/ebpf/redirect"
 	"github.com/dmaina5054/mithril/proxy/ebpf/snifilter"
 	"github.com/dmaina5054/mithril/proxy/ebpf/sockops"
 	"github.com/dmaina5054/mithril/proxy/internal/metrics"
@@ -63,9 +73,17 @@ func main() {
 
 	sessions := proxy.NewSessionStore() // shared across profiles — session keys are profile-username-prefixed, no collision risk
 
-	errCh := make(chan error, len(profiles.Profiles))
+	// SortedNames gives deterministic profile index assignment — the
+	// SAME ordering startRedirectEnforcement uses to populate
+	// proxy_required_pids, so a profile's index here matches what the
+	// eBPF connect4 hook records for its enforced PIDs.
+	names := profiles.SortedNames()
+	resolvers := make(proxy.ProfileResolvers, len(names))
+
+	errCh := make(chan error, len(names))
 	started := 0
-	for name, p := range profiles.Profiles {
+	for i, name := range names {
+		p := profiles.Profiles[name]
 		listenAddr := fmt.Sprintf("127.0.0.1:%d", p.ListenPort)
 		ln, err := net.Listen("tcp", listenAddr)
 		if err != nil {
@@ -78,8 +96,9 @@ func main() {
 			UpstreamAddr: upstreamAddr,
 			Sessions:     sessions,
 		}
+		resolvers[uint8(i)] = router
 
-		log.Printf("mithril-proxy: profile %q listening on %s, upstream %s", name, listenAddr, upstreamAddr)
+		log.Printf("mithril-proxy: profile %q (index %d) listening on %s, upstream %s", name, i, listenAddr, upstreamAddr)
 		started++
 		go func(ln net.Listener, router *proxy.Router) {
 			errCh <- proxy.Serve(ln, router)
@@ -89,6 +108,8 @@ func main() {
 	if started == 0 {
 		log.Fatal("mithril-proxy: no profiles started")
 	}
+
+	startRedirectEnforcement(ctx, profiles, resolvers, errCh)
 
 	// Any single listener returning, or a shutdown signal, ends the
 	// process. Listener errors still exit immediately (no partial-
@@ -113,8 +134,8 @@ func main() {
 // comment) needs real privileged verification.
 func startEBPF(ctx context.Context) {
 	const cgroupRoot = "/sys/fs/cgroup"
-	const ebpfExporterAddr = "127.0.0.1:9435"
-	const readInterval = 5 * time.Second // spec: "Go reads map every 5s"
+	const ebpfExporterAddr = "0.0.0.0:9435" // bind all interfaces — Prometheus container needs host.docker.internal to reach it
+	const readInterval = 5 * time.Second    // spec: "Go reads map every 5s"
 
 	tracker, err := sockops.Load()
 	if err != nil {
@@ -192,6 +213,89 @@ func startSNIFilter(ctx context.Context) {
 			log.Print("mithril-proxy: eBPF SNI socket filter unloaded")
 		}
 	}()
+}
+
+// transparentListenerAddr must match ebpf/redirect/redirect.c's
+// TRANSPARENT_LISTENER_PORT #define — the eBPF program can't read this
+// from config, so both sides hardcode the same value with a
+// cross-reference comment. If this ever needs to change, it has to
+// change in both places.
+const transparentListenerAddr = "127.0.0.1:19001"
+
+// startRedirectEnforcement loads and attaches the Phase 7 eBPF
+// programs (connect4 redirect + sockops correlation bridge), populates
+// proxy_required_pids from every profile's enforce_pids, and starts the
+// transparent listener. Non-fatal on eBPF load/attach failure, same
+// pattern as startEBPF/startSNIFilter — but unlike those, a failure
+// here also means no PIDs get enforced at all, so it's logged more
+// prominently. NOT LIVE-VERIFIED — this is the highest-risk, least-
+// precedented eBPF phase in this project (see ebpf/redirect.Tracker's
+// doc comment); errCh is passed through so the transparent listener's
+// own Accept-loop failures surface the same way every other listener's
+// does, not silently.
+func startRedirectEnforcement(ctx context.Context, profiles *config.ProfilesConfig, resolvers proxy.ProfileResolvers, errCh chan<- error) {
+	const cgroupRoot = "/sys/fs/cgroup"
+
+	tracker, err := redirect.Load()
+	if err != nil {
+		log.Printf("mithril-proxy: eBPF traffic enforcement disabled (Phase 7 unavailable, direct-connection bypass NOT prevented): %v", err)
+		return
+	}
+
+	if err := tracker.AttachCgroup(cgroupRoot); err != nil {
+		log.Printf("mithril-proxy: eBPF traffic enforcement disabled (cgroup attach failed): %v", err)
+		tracker.Close()
+		return
+	}
+
+	names := profiles.SortedNames()
+	enforced := 0
+	for i, name := range names {
+		p := profiles.Profiles[name]
+		for _, pid := range p.EnforcePIDs {
+			if err := tracker.AddRequiredPID(pid, uint8(i)); err != nil {
+				log.Printf("mithril-proxy: failed to enforce pid %d for profile %q: %v", pid, name, err)
+				continue
+			}
+			enforced++
+		}
+	}
+	log.Printf("mithril-proxy: eBPF traffic enforcement attached to %s, %d PID(s) enforced", cgroupRoot, enforced)
+
+	ln, err := net.Listen("tcp", transparentListenerAddr)
+	if err != nil {
+		log.Printf("mithril-proxy: transparent listener failed (redirected connections will fail to connect): %v", err)
+		tracker.Close()
+		return
+	}
+	log.Printf("mithril-proxy: transparent listener on %s", transparentListenerAddr)
+
+	go func() {
+		errCh <- proxy.ServeTransparent(ln, redirectLookupAdapter{tracker}, resolvers)
+	}()
+
+	go func() {
+		<-ctx.Done()
+		ln.Close()
+		if err := tracker.Close(); err != nil {
+			log.Printf("mithril-proxy: eBPF traffic enforcement cleanup error: %v", err)
+		} else {
+			log.Print("mithril-proxy: eBPF traffic enforcement unloaded")
+		}
+	}()
+}
+
+// redirectLookupAdapter adapts *redirect.Tracker's struct-returning
+// LookupOriginalDest to proxy.RedirectLookup's primitive-returning
+// signature — keeps internal/proxy free of an ebpf/redirect import,
+// same pattern as SocketFilterAttacher for ebpf/snifilter.
+type redirectLookupAdapter struct {
+	tracker *redirect.Tracker
+}
+
+func (a redirectLookupAdapter) LookupOriginalDest(localPort uint16) (net.IP, uint16, uint8, bool, error) {
+	dest, found, err := a.tracker.LookupOriginalDest(localPort)
+	return dest.IP, dest.Port, dest.ProfileIndex, found, err
 }
 
 func envOrDefault(key, def string) string {
