@@ -1,0 +1,30 @@
+# config/alerts/infra.yml
+groups:
+  - name: infra
+    rules:
+      - alert: ZFSPoolNotOnline
+        expr: node_zfs_zpool_state != 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "ZFS pool {{ $labels.zpool }} not online"
+          description: "ZFS pool {{ $labels.zpool }} on {{ $labels.node }} has reported a non-online state for 2 minutes. Check `zpool status {{ $labels.zpool }}` on the host."
+
+      - alert: HighMemoryUsage
+        expr: node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes < 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Low available memory on {{ $labels.node }}"
+          description: "Available memory on {{ $labels.node }} has been below 10% of total for 5 minutes ({{ $value | humanizePercentage }} available)."
+
+      - alert: DiskSpaceLow
+        expr: node_filesystem_avail_bytes / node_filesystem_size_bytes < 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Low disk space on {{ $labels.mountpoint }}"
+          description: "Filesystem {{ $labels.mountpoint }} on {{ $labels.node }} has less than 10% space available for 5 minutes ({{ $value | humanizePercentage }} available)."

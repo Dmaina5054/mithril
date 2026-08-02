@@ -1,0 +1,51 @@
+# /home/dm/Projects/learn/golang/mithril/observability/config/prometheus.yml
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    environment: personal
+    node: minas-tirith
+
+rule_files:
+  - /etc/prometheus/alerts/*.yml
+
+scrape_configs:
+  # ── Host metrics ──────────────────────────────────────────────
+  - job_name: node
+    static_configs:
+      - targets: [host.docker.internal:9100]
+        labels:
+          node: minas-tirith
+          workload: infra
+
+  # ── SOCKS5 proxy metrics ──────────────────────────────────────
+  - job_name: socks5-proxy
+    static_configs:
+      - targets: [host.docker.internal:9998]
+        labels:
+          node: minas-tirith
+          workload: kioo-labs
+
+  # ── eBPF exporter ─────────────────────────────────────────────
+  - job_name: ebpf-exporter
+    static_configs:
+      - targets: [host.docker.internal:9435]
+        labels:
+          node: minas-tirith
+          workload: infra
+
+  # ── TEMPLATE: add future nodes here ──────────────────────────
+  # - job_name: gondor-node
+  #   static_configs:
+  #     - targets: [gondor.tail-xxxx.ts.net:9100]
+  #       labels:
+  #         node: gondor
+  #         workload: cka-lab
+  #
+  # - job_name: hermes
+  #   static_configs:
+  #     - targets: [localhost:9501]
+  #       labels:
+  #         node: minas-tirith
+  #         workload: hermes

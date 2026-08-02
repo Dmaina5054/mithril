@@ -1,0 +1,39 @@
+# config/alerts/proxy.yml
+groups:
+  - name: proxy
+    rules:
+      - alert: IPRoyalBandwidthLow
+        expr: iproyal_subuser_traffic_available_gb < 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "IPRoyal bandwidth running low for {{ $labels.subuser }}"
+          description: "Available IPRoyal traffic for subuser {{ $labels.subuser }} on {{ $labels.node }} is {{ $value | printf \"%.2f\" }} GB, below the 1 GB warning threshold, for the last 5 minutes."
+
+      - alert: IPRoyalSubuserExhausted
+        expr: iproyal_subuser_traffic_available_gb < 0.1
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "IPRoyal subuser {{ $labels.subuser }} nearly exhausted"
+          description: "Available IPRoyal traffic for subuser {{ $labels.subuser }} on {{ $labels.node }} is {{ $value | printf \"%.3f\" }} GB, below the 0.1 GB critical threshold, for the last 1 minute."
+
+      - alert: ProxyDown
+        expr: up{job="socks5-proxy"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "socks5-proxy target down"
+          description: "Prometheus has been unable to scrape the socks5-proxy job on {{ $labels.instance }} for 2 minutes — the /metrics endpoint on :9998 is not responding."
+
+      - alert: HighConnectionErrorRate
+        expr: rate(proxy_connection_errors_total[5m]) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High proxy connection error rate"
+          description: "socks5-proxy on {{ $labels.node }} is recording more than 0.1 connection errors/sec (5m rate), currently {{ $value | printf \"%.3f\" }}/sec."

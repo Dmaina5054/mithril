@@ -1,0 +1,88 @@
+{
+  "uid": "mithril-zfs-health",
+  "title": "Minas Tirith Infra / ZFS Health",
+  "description": "ZFS pool state and error counters from node_exporter's ZFS collector, plus I/O-vs-proxy-duration correlation from eBPF Feature 4 (kprobe, Session B Phase 8).",
+  "tags": ["mithril", "infra", "zfs"],
+  "timezone": "browser",
+  "editable": true,
+  "graphTooltip": 1,
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-6h", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": {},
+        "hide": 0,
+        "label": "Datasource",
+        "refresh": 1,
+        "regex": ""
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "ZFS Pool State",
+      "description": "0 = ONLINE (green). Any other value = degraded/faulted (red). Matches the ZFSPoolNotOnline alert condition (node_zfs_zpool_state != 0).",
+      "gridPos": { "x": 0, "y": 0, "w": 8, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        { "expr": "node_zfs_zpool_state", "legendFormat": "{{zpool}}", "refId": "A" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "type": "value", "options": { "0": { "text": "ONLINE", "color": "green" } } },
+            { "type": "special", "options": { "match": "true", "result": { "text": "DEGRADED", "color": "red" } } }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "ZFS Errors (Read / Write / Checksum)",
+      "gridPos": { "x": 8, "y": 0, "w": 16, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        { "expr": "node_zfs_zpool_read_errors", "legendFormat": "{{zpool}} read", "refId": "A" },
+        { "expr": "node_zfs_zpool_write_errors", "legendFormat": "{{zpool}} write", "refId": "B" },
+        { "expr": "node_zfs_zpool_checksum_errors", "legendFormat": "{{zpool}} checksum", "refId": "C" }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short", "min": 0 },
+        "overrides": []
+      }
+    },
+    {
+      "id": 3,
+      "type": "xychart",
+      "title": "ZFS Concurrent Writes vs Proxy Connection Duration",
+      "description": "PLACEHOLDER METRIC NAMES — proxy_connection_duration_ms and proxy_zfs_writes_concurrent are proposed names for the per-connection-close snapshot described in spec section 4 (eBPF Feature 4). Not yet emitted by the proxy; wire up in Session B Phase 8 (ZFS kprobe) and Phase 9 (Prometheus metrics). Update this panel's queries if the actual metric names differ.",
+      "gridPos": { "x": 0, "y": 8, "w": 24, "h": 9 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        { "expr": "proxy_connection_duration_ms", "legendFormat": "duration_ms", "refId": "A" },
+        { "expr": "proxy_zfs_writes_concurrent", "legendFormat": "zfs_writes_concurrent", "refId": "B" }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      }
+    }
+  ]
+}

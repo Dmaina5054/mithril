@@ -1,0 +1,88 @@
+{
+  "uid": "mithril-ebpf-flow",
+  "title": "eBPF / Flow Classification",
+  "description": "SNI-classified flow breakdown (Feature 2), per-process bandwidth (Feature 3), and ZFS I/O correlation (Feature 4) from the mithril eBPF programs.",
+  "tags": ["mithril", "ebpf"],
+  "timezone": "browser",
+  "editable": true,
+  "graphTooltip": 1,
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-6h", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": {},
+        "hide": 0,
+        "label": "Datasource",
+        "refresh": 1,
+        "regex": ""
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "bargauge",
+      "title": "Flow Classification Breakdown",
+      "description": "PLACEHOLDER METRIC NAME — proxy_flow_classified_total{flow_type} is proposed for the socket-filter SNI classifier (spec section 4, eBPF Feature 2: FLOW_IMAGE_UPLOAD / FLOW_API_CALL / FLOW_TELEMETRY / FLOW_UNKNOWN). Wire up in Session B Phase 6.",
+      "gridPos": { "x": 0, "y": 0, "w": 24, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        {
+          "expr": "sum by (flow_type) (increase(proxy_flow_classified_total[5m]))",
+          "legendFormat": "{{flow_type}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short", "min": 0 },
+        "overrides": []
+      }
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Per-Process Bandwidth",
+      "description": "iproyal_process_bytes_sent_total / iproyal_process_bytes_recv_total from eBPF Feature 3 (sock_ops).",
+      "gridPos": { "x": 0, "y": 8, "w": 24, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        {
+          "expr": "sum by (process) (rate(iproyal_process_bytes_sent_total[5m]))",
+          "legendFormat": "{{process}} sent",
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (process) (rate(iproyal_process_bytes_recv_total[5m]))",
+          "legendFormat": "{{process}} recv",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "Bps" },
+        "overrides": []
+      }
+    },
+    {
+      "id": 3,
+      "type": "xychart",
+      "title": "ZFS Concurrent Writes vs Job Duration",
+      "description": "PLACEHOLDER METRIC NAMES — see Minas Tirith Infra/zfs-health.json for the same panel and the naming caveat. proxy_connection_duration_ms and proxy_zfs_writes_concurrent must match whatever Session B Phase 8/9 actually emits.",
+      "gridPos": { "x": 0, "y": 16, "w": 24, "h": 9 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        { "expr": "proxy_connection_duration_ms", "legendFormat": "duration_ms", "refId": "A" },
+        { "expr": "proxy_zfs_writes_concurrent", "legendFormat": "zfs_writes_concurrent", "refId": "B" }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      }
+    }
+  ]
+}

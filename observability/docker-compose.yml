@@ -1,0 +1,53 @@
+# /home/dm/Projects/learn/golang/mithril/observability/docker-compose.yml
+# Mount points are explicit — migrate these volumes to k8s PVCs later
+
+services:
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:9090:9090"  # localhost only — NOT Tailscale-exposed
+    volumes:
+      - ./config/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./config/alerts/:/etc/prometheus/alerts/:ro
+      - prometheus_data:/prometheus
+    extra_hosts:
+      - "host.docker.internal:host-gateway"  # Linux Docker Engine doesn't resolve this by default
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=90d"
+      - "--web.enable-lifecycle"  # hot reload via curl /-/reload
+      - "--web.listen-address=0.0.0.0:9090"
+    networks: [observability]
+
+  grafana:
+    image: grafana/grafana-oss:latest
+    container_name: grafana
+    restart: unless-stopped
+    ports:
+      - "0.0.0.0:3000:3000"  # Tailscale-accessible on port 3000
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./config/grafana/provisioning:/etc/grafana/provisioning:ro
+    environment:
+      - GF_SECURITY_ADMIN_USER=daniel
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD}
+      - GF_SECURITY_DISABLE_GRAVATAR=true
+      - GF_AUTH_ANONYMOUS_ENABLED=false
+      - GF_SERVER_ROOT_URL=http://minas-tirith.tail-xxxx.ts.net:3000
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_SECURITY_SECRET_KEY=${GRAFANA_SECRET_KEY}
+    networks: [observability]
+    depends_on: [prometheus]
+
+volumes:
+  prometheus_data:
+    name: prometheus_data  # explicit name — easy to reference in k8s migration
+  grafana_data:
+    name: grafana_data
+
+networks:
+  observability:
+    name: observability
