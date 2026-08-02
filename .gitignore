@@ -1,2 +1,25 @@
+# Secrets
 .env
+
+# Claude Code working directory
 .claude/
+
+# Go build artifacts
+proxy/socks5-proxy
+proxy/cmd/apismoke/apismoke
+*.test
+*.out
+*.prof
+
+# eBPF build artifacts
+ebpf/*.o
+ebpf/*.ll
+proxy/ebpf/**/*_bpfel.go
+proxy/ebpf/**/*_bpfeb.go
+
+# Go module — go.sum is committed (lockfile)
+# vendor/ should not exist if using module mode
+
+# OS junk
+.DS_Store
+Thumbs.db
