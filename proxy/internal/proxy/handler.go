@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bufio"
 	"fmt"
 	"log"
 	"net"
@@ -69,7 +70,46 @@ func Handle(conn net.Conn, resolver Resolver) {
 	}
 
 	log.Printf("mithril-proxy: connected %s -> %s via %s", conn.RemoteAddr(), target.Addr(), upstreamAddr)
-	Relay(conn, upstream)
+
+	// Go SNI peek (eBPF Feature 5): a pure-Go fallback/complement to the
+	// eBPF socket-filter SNI extractor, for when that filter fires too
+	// late or the handshake is non-standard. Must happen here, at the
+	// start of relay — this is the first point any client application
+	// data (as opposed to the SOCKS5 control channel) exists to peek at.
+	// bufferedConn preserves the peeked bytes so Relay still sees them.
+	//
+	// bufio.Reader.Peek(n) blocks until it accumulates the full n bytes
+	// or the underlying Read errors — NOT "at least 1 byte" like the
+	// spec's original io.ReadAtLeast sketch. Without a bounded deadline
+	// here, any connection whose first flight is under sniPeekSize bytes
+	// (a short HTTP request, or a ClientHello record smaller than 512
+	// with nothing sent immediately after) would stall relay entirely
+	// waiting for bytes that aren't coming yet. 200ms is enough for a
+	// same-flight TLS ClientHello to arrive; anything less just means
+	// PeekSNI parses a partial buffer and likely returns "".
+	buffered := &bufferedConn{Conn: conn, r: bufio.NewReaderSize(conn, sniPeekSize)}
+	_ = conn.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+	sni, peekErr := PeekSNI(buffered.r)
+	_ = conn.SetReadDeadline(time.Time{}) // clear before relay — no deadline on the actual data path
+	if peekErr == nil && sni != "" {
+		log.Printf("mithril-proxy: sni=%s conn=%s->%s", sni, conn.RemoteAddr(), target.Addr())
+	}
+
+	Relay(buffered, upstream)
+}
+
+// bufferedConn is a net.Conn whose Read goes through a bufio.Reader
+// instead of the embedded Conn directly — used so bytes consumed by a
+// Peek (e.g. PeekSNI) are still delivered to the next Read, rather than
+// lost. Every other method (Write, Close, deadlines, ...) passes
+// through to the embedded Conn unchanged.
+type bufferedConn struct {
+	net.Conn
+	r *bufio.Reader
+}
+
+func (b *bufferedConn) Read(p []byte) (int, error) {
+	return b.r.Read(p)
 }
 
 // Serve accepts connections on ln forever, handling each with resolver
