@@ -192,6 +192,15 @@ static __always_inline int try_parse_sni(struct __sk_buff *skb, char *sni_out, u
 				return 0;
 
 			u32 copy_len = name_len < SNI_MAX_LEN ? name_len : SNI_MAX_LEN;
+			// bpf_skb_load_bytes rejects a provably-zero-length read at
+			// verify time (confirmed live: "R4 invalid zero-sized read:
+			// u64=[0,63]") — copy_len's tracked range includes 0 since
+			// name_len could legitimately be 0 (a malformed/empty SNI
+			// hostname). An empty hostname isn't a meaningful SNI value
+			// anyway, so treat it the same as "not found" rather than
+			// special-casing a zero-length load.
+			if (copy_len == 0)
+				return 0;
 			if (bpf_skb_load_bytes(skb, list_off, sni_out, copy_len) < 0)
 				return 0;
 			*sni_len_out = copy_len;
