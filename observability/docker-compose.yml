@@ -37,7 +37,7 @@ services:
       - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD}
       - GF_SECURITY_DISABLE_GRAVATAR=true
       - GF_AUTH_ANONYMOUS_ENABLED=false
-      - GF_SERVER_ROOT_URL=http://minas-tirith.tail-xxxx.ts.net:3001
+      - GF_SERVER_ROOT_URL=http://debian.tail0a4eef.ts.net:3001
       - GF_USERS_ALLOW_SIGN_UP=false
       - GF_SECURITY_SECRET_KEY=${GRAFANA_SECRET_KEY}
     depends_on: [prometheus]

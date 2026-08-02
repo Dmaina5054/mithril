@@ -18,19 +18,17 @@ cp .env.example .env && nano .env   # fill in GRAFANA_PASSWORD, GRAFANA_SECRET_K
 docker compose up -d
 ```
 
-Before Grafana is reachable over Tailscale, confirm the node's Tailscale
-hostname and update `GF_SERVER_ROOT_URL` in `docker-compose.yml`:
-
-```bash
-tailscale status | grep minas
-```
+Grafana's `GF_SERVER_ROOT_URL` is set to this node's real Tailscale
+hostname, `debian.tail0a4eef.ts.net` (the Tailscale device name is
+`debian`, not `minas-tirith` — check with `tailscale status` if it
+ever changes, e.g. after a reinstall).
 
 ## Verify
 
 ```bash
 docker compose ps
 curl http://localhost:9090/-/healthy          # Prometheus
-# Grafana: http://minas-tirith.tail-xxxx.ts.net:3001
+# Grafana: http://debian.tail0a4eef.ts.net:3001
 ```
 
 ## Operations
