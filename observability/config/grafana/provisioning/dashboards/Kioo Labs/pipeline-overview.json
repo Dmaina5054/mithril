@@ -1,0 +1,105 @@
+{
+  "uid": "mithril-kioo-pipeline",
+  "title": "Kioo Labs / Pipeline Overview",
+  "description": "High-level health of the Kioo Labs image pipeline as seen through the proxy: active jobs, image-upload flow volume, ComfyUI process bandwidth, and ZFS contention during jobs.",
+  "tags": ["mithril", "kioo-labs", "iproyal", "shire-forge"],
+  "timezone": "browser",
+  "editable": true,
+  "graphTooltip": 1,
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-6h", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": {},
+        "hide": 0,
+        "label": "Datasource",
+        "refresh": 1,
+        "regex": ""
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Active Kioo Labs Connections",
+      "gridPos": { "x": 0, "y": 0, "w": 6, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        {
+          "expr": "sum(proxy_active_connections{profile=\"kioo-labs\"})",
+          "legendFormat": "active",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short", "min": 0 },
+        "overrides": []
+      }
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Image Upload Flow Rate",
+      "description": "PLACEHOLDER METRIC — proxy_flow_classified_total{flow_type=\"FLOW_IMAGE_UPLOAD\"} proposed in eBPF/flow-classification.json, wired in Session B Phase 6.",
+      "gridPos": { "x": 6, "y": 0, "w": 18, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        {
+          "expr": "sum(increase(proxy_flow_classified_total{flow_type=\"FLOW_IMAGE_UPLOAD\"}[5m]))",
+          "legendFormat": "image uploads",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short", "min": 0 },
+        "overrides": []
+      }
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "ComfyUI Process Bandwidth",
+      "gridPos": { "x": 0, "y": 8, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        {
+          "expr": "rate(iproyal_process_bytes_sent_total{process=\"comfyui\"}[5m])",
+          "legendFormat": "sent",
+          "refId": "A"
+        },
+        {
+          "expr": "rate(iproyal_process_bytes_recv_total{process=\"comfyui\"}[5m])",
+          "legendFormat": "recv",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "Bps" },
+        "overrides": []
+      }
+    },
+    {
+      "id": 4,
+      "type": "xychart",
+      "title": "ZFS Concurrent Writes vs Job Duration (Kioo Labs)",
+      "description": "PLACEHOLDER METRIC NAMES — see Minas Tirith Infra/zfs-health.json for the same panel and naming caveat. proxy_connection_duration_ms and proxy_zfs_writes_concurrent must match whatever Session B Phase 8/9 actually emits.",
+      "gridPos": { "x": 12, "y": 8, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        { "expr": "proxy_connection_duration_ms{profile=\"kioo-labs\"}", "legendFormat": "duration_ms", "refId": "A" },
+        { "expr": "proxy_zfs_writes_concurrent", "legendFormat": "zfs_writes_concurrent", "refId": "B" }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      }
+    }
+  ]
+}

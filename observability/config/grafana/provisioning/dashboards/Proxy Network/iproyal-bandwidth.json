@@ -1,0 +1,73 @@
+{
+  "uid": "mithril-iproyal-bandwidth",
+  "title": "Proxy Network / IPRoyal Bandwidth",
+  "description": "Account-wide IPRoyal bandwidth view — all sub-users, plus entry-node benchmark latency from the startup/6h selection cycle. Complements Kioo Labs/bandwidth-per-subuser.json, which is scoped to a single sub-user.",
+  "tags": ["mithril", "proxy", "network", "iproyal"],
+  "timezone": "browser",
+  "editable": true,
+  "graphTooltip": 1,
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-6h", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": {},
+        "hide": 0,
+        "label": "Datasource",
+        "refresh": 1,
+        "regex": ""
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Account Traffic Available (GB)",
+      "description": "PLACEHOLDER METRIC — iproyal_account_traffic_available_gb, from GET /me (account-level), distinct from the per-subuser iproyal_subuser_traffic_available_gb already wired. Wire up alongside the existing IPRoyal API client work.",
+      "gridPos": { "x": 0, "y": 0, "w": 8, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        { "expr": "iproyal_account_traffic_available_gb", "legendFormat": "account", "refId": "A" }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "decgbytes", "min": 0 },
+        "overrides": []
+      }
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Traffic Available (GB) by Sub-User",
+      "gridPos": { "x": 8, "y": 0, "w": 16, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        { "expr": "iproyal_subuser_traffic_available_gb", "legendFormat": "{{subuser}}", "refId": "A" }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "decgbytes" },
+        "overrides": []
+      }
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Entry Node Benchmark Latency",
+      "description": "PLACEHOLDER METRIC — proxy_entry_node_latency_ms{node=...}, distinct from proxy_upstream_latency_ms (the currently-selected entry's live latency, already wired in Proxy Network/socks5-connections.json). This panel is the full benchmark set from GET /access/entry-nodes, refreshed on startup + every 6h.",
+      "gridPos": { "x": 0, "y": 8, "w": 24, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        { "expr": "proxy_entry_node_latency_ms", "legendFormat": "{{node}}", "refId": "A" }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "ms" },
+        "overrides": []
+      }
+    }
+  ]
+}
