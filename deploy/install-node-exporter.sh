@@ -74,7 +74,7 @@ After=network.target
 Type=simple
 ExecStart=${INSTALL_DIR}/node_exporter \\
     --collector.zfs \\
-    --web.listen-address=127.0.0.1:9100 \\
+    --web.listen-address=0.0.0.0:9100 \\
     --collector.systemd \\
     --collector.processes
 Restart=always

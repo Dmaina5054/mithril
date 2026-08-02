@@ -30,7 +30,7 @@ tailscale status | grep minas
 ```bash
 docker compose ps
 curl http://localhost:9090/-/healthy          # Prometheus
-# Grafana: http://minas-tirith.tail-xxxx.ts.net:3000
+# Grafana: http://minas-tirith.tail-xxxx.ts.net:3001
 ```
 
 ## Operations
@@ -99,9 +99,9 @@ observability/
 ## Notes
 
 - Prometheus binds `127.0.0.1:9090` only — it has no auth by default, so
-  it is never exposed on Tailscale. Grafana (`0.0.0.0:3000`, full auth)
+  it is never exposed on Tailscale. Grafana (`0.0.0.0:3001`, full auth)
   is the only human entry point and reaches Prometheus over the internal
-  `observability` Docker network.
+  Docker network.
 - `host.docker.internal` does not resolve by default on Linux Docker
   Engine (only Docker Desktop does this natively) — the Prometheus
   service carries an explicit `extra_hosts: host.docker.internal:host-gateway`

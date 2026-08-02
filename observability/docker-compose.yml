@@ -1,5 +1,7 @@
 # /home/dm/Projects/learn/golang/mithril/observability/docker-compose.yml
-# Mount points are explicit — migrate these volumes to k8s PVCs later
+# Services on the default bridge network — custom networks had a NAT gap
+# on this kernel (Docker 29.6.2, Debian 13, iptables backend).
+# Default bridge resolves service names identically and works.
 
 services:
   prometheus:
@@ -20,14 +22,13 @@ services:
       - "--storage.tsdb.retention.time=90d"
       - "--web.enable-lifecycle"  # hot reload via curl /-/reload
       - "--web.listen-address=0.0.0.0:9090"
-    networks: [observability]
 
   grafana:
     image: grafana/grafana-oss:latest
     container_name: grafana
     restart: unless-stopped
     ports:
-      - "0.0.0.0:3000:3000"  # Tailscale-accessible on port 3000
+      - "0.0.0.0:3001:3000"  # Tailscale-accessible — 3000 taken by Hermes WhatsApp bridge
     volumes:
       - grafana_data:/var/lib/grafana
       - ./config/grafana/provisioning:/etc/grafana/provisioning:ro
@@ -36,18 +37,13 @@ services:
       - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD}
       - GF_SECURITY_DISABLE_GRAVATAR=true
       - GF_AUTH_ANONYMOUS_ENABLED=false
-      - GF_SERVER_ROOT_URL=http://minas-tirith.tail-xxxx.ts.net:3000
+      - GF_SERVER_ROOT_URL=http://minas-tirith.tail-xxxx.ts.net:3001
       - GF_USERS_ALLOW_SIGN_UP=false
       - GF_SECURITY_SECRET_KEY=${GRAFANA_SECRET_KEY}
-    networks: [observability]
     depends_on: [prometheus]
 
 volumes:
   prometheus_data:
-    name: prometheus_data  # explicit name — easy to reference in k8s migration
+    name: prometheus_data
   grafana_data:
     name: grafana_data
-
-networks:
-  observability:
-    name: observability
