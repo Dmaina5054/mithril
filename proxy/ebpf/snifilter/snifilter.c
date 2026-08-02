@@ -84,123 +84,121 @@ struct {
 } conn_tracking SEC(".maps");
 
 // try_parse_sni walks a TLS ClientHello starting at the packet's first
-// byte, mirroring internal/proxy/sni.go's parseSNI logic but rewritten
-// for the eBPF verifier: every pointer advance is bounds-checked against
-// data_end before the byte at that position is read, and all loops have
-// a small compile-time-visible upper bound. Returns 1 and fills
-// sni_out/*sni_len_out if an SNI hostname was found, 0 otherwise (not
-// TLS, truncated, no SNI extension — never treated as an error, just
-// "nothing found here"). sni_out must point at a SNI_MAX_LEN buffer.
-static __always_inline int try_parse_sni(void *data, void *data_end, char *sni_out, u32 *sni_len_out) {
-	u8 *p = data;
+// byte, mirroring internal/proxy/sni.go's parseSNI logic. Rewritten a
+// second time for this file: the original used direct pointer access
+// (skb->data/data_end cast to a pointer, walked with bounds checks
+// against data_end) — confirmed by live verifier testing to be
+// rejected entirely for a socket_filter attached to a connected TCP
+// socket on this kernel (6.12.95+deb13): "invalid bpf_context access
+// off=76 size=4" for skb->data itself, not just data_end. Direct
+// packet access (the data/data_end mechanism) appears unavailable for
+// this specific attachment style, even though it's a fundamental,
+// widely-used eBPF feature elsewhere (including for the SAME program
+// type attached to AF_PACKET sockets, per samples/bpf/sockex1_kern.c).
+//
+// This version reads via bpf_skb_load_bytes(skb, offset, buf, len)
+// instead — an offset/cursor-based helper that does its own bounds
+// checking against skb->len internally (returns < 0 if offset+len
+// exceeds it), rather than pointer arithmetic the verifier statically
+// proves. No data/data_end access anywhere in this function.
+//
+// Returns 1 and fills sni_out/*sni_len_out if an SNI hostname was
+// found, 0 otherwise (not TLS, truncated, no SNI extension, or a load
+// failed — never treated as a hard error, just "nothing found here").
+// sni_out must point at a SNI_MAX_LEN buffer.
+static __always_inline int try_parse_sni(struct __sk_buff *skb, char *sni_out, u32 *sni_len_out) {
+	u32 off = 0;
 
-	// TLS record header: type(1) version(2) length(2)
-	if (p + 5 > (u8 *)data_end)
+	// TLS record header: type(1) version(2) length(2) — only need byte 0
+	u8 rec_type;
+	if (bpf_skb_load_bytes(skb, off, &rec_type, 1) < 0)
 		return 0;
-	if (p[0] != TLS_HANDSHAKE)
+	if (rec_type != TLS_HANDSHAKE)
 		return 0;
-	p += 5;
+	off += 5;
 
-	// Handshake header: type(1) length(3)
-	if (p + 4 > (u8 *)data_end)
+	// Handshake header: type(1) length(3) — only need byte 0
+	u8 hs_type;
+	if (bpf_skb_load_bytes(skb, off, &hs_type, 1) < 0)
 		return 0;
-	if (p[0] != TLS_CLIENT_HELLO)
+	if (hs_type != TLS_CLIENT_HELLO)
 		return 0;
-	p += 4;
+	off += 4;
 
-	// client_version(2) + random(32)
-	if (p + 34 > (u8 *)data_end)
-		return 0;
-	p += 34;
+	// client_version(2) + random(32) — contents unused, skip over
+	off += 34;
 
-	// session_id
-	if (p + 1 > (u8 *)data_end)
+	// session_id: length(1) + bytes
+	u8 sid_len;
+	if (bpf_skb_load_bytes(skb, off, &sid_len, 1) < 0)
 		return 0;
-	u32 sid_len = p[0];
-	p += 1;
-	if (p + sid_len > (u8 *)data_end)
-		return 0;
-	p += sid_len;
+	off += 1 + sid_len;
 
-	// cipher_suites
-	if (p + 2 > (u8 *)data_end)
+	// cipher_suites: length(2) + bytes
+	u8 cs_len_buf[2];
+	if (bpf_skb_load_bytes(skb, off, cs_len_buf, sizeof(cs_len_buf)) < 0)
 		return 0;
-	u32 cs_len = ((u32)p[0] << 8) | p[1];
-	p += 2;
-	if (p + cs_len > (u8 *)data_end)
-		return 0;
-	p += cs_len;
+	u32 cs_len = ((u32)cs_len_buf[0] << 8) | cs_len_buf[1];
+	off += 2 + cs_len;
 
-	// compression_methods
-	if (p + 1 > (u8 *)data_end)
+	// compression_methods: length(1) + bytes
+	u8 cm_len;
+	if (bpf_skb_load_bytes(skb, off, &cm_len, 1) < 0)
 		return 0;
-	u32 cm_len = p[0];
-	p += 1;
-	if (p + cm_len > (u8 *)data_end)
-		return 0;
-	p += cm_len;
+	off += 1 + cm_len;
 
-	// extensions total length
-	if (p + 2 > (u8 *)data_end)
+	// extensions total length(2)
+	u8 ext_total_buf[2];
+	if (bpf_skb_load_bytes(skb, off, ext_total_buf, sizeof(ext_total_buf)) < 0)
 		return 0;
-	u32 ext_total_len = ((u32)p[0] << 8) | p[1];
-	p += 2;
-	u8 *ext_end = p + ext_total_len;
-	if (ext_end > (u8 *)data_end)
-		ext_end = data_end; // truncated by our packet window — parse what we have
+	u32 ext_total_len = ((u32)ext_total_buf[0] << 8) | ext_total_buf[1];
+	off += 2;
+	u32 ext_end = off + ext_total_len; // bpf_skb_load_bytes bounds-checks against
+	                                    // the real skb->len itself on every read
+	                                    // below — no separate data_end comparison needed.
 
-// #pragma unroll: extension list length is bounded by ext_total_len,
-// but the verifier needs a compile-time-visible iteration cap, not a
-// data-dependent one. 32 covers real-world ClientHellos comfortably
-// (a handful of extensions is typical; if a client sends more than 32,
-// SNI is virtually always near the front anyway per common client
-// implementations, so we'd have found it well before hitting the cap).
+// #pragma unroll: extension count is bounded by ext_total_len, but the
+// verifier needs a compile-time-visible iteration cap. 32 covers
+// real-world ClientHellos comfortably — see the original version's
+// comment (unchanged reasoning, just re-implemented).
 #pragma unroll
 	for (int i = 0; i < 32; i++) {
-		if (p + 4 > ext_end)
+		if (off + 4 > ext_end)
 			break;
 
-		u32 ext_type = ((u32)p[0] << 8) | p[1];
-		u32 ext_len = ((u32)p[2] << 8) | p[3];
-		p += 4;
+		u8 ext_hdr[4];
+		if (bpf_skb_load_bytes(skb, off, ext_hdr, sizeof(ext_hdr)) < 0)
+			break;
+		u32 ext_type = ((u32)ext_hdr[0] << 8) | ext_hdr[1];
+		u32 ext_len = ((u32)ext_hdr[2] << 8) | ext_hdr[3];
+		off += 4;
 
-		if (p + ext_len > ext_end)
+		if (off + ext_len > ext_end)
 			break; // truncated mid-extension — stop, don't trust what's left
 
 		if (ext_type == TLS_EXT_SNI) {
-			u8 *list = p;
 			// server_name_list: list_length(2) + entries{type(1), len(2), name}
-			if (list + 2 > ext_end)
-				return 0;
-			list += 2;
+			u32 list_off = off + 2; // skip list_length — server_name_list is
+			                          // basically always exactly one entry
 
-			if (list + 3 > ext_end)
+			u8 entry_hdr[3];
+			if (bpf_skb_load_bytes(skb, list_off, entry_hdr, sizeof(entry_hdr)) < 0)
 				return 0;
-			u8 name_type = list[0];
-			u32 name_len = ((u32)list[1] << 8) | list[2];
-			list += 3;
+			u8 name_type = entry_hdr[0];
+			u32 name_len = ((u32)entry_hdr[1] << 8) | entry_hdr[2];
+			list_off += 3;
 
-			if (list + name_len > ext_end)
-				return 0;
 			if (name_type != SNI_HOST_NAME)
 				return 0;
 
 			u32 copy_len = name_len < SNI_MAX_LEN ? name_len : SNI_MAX_LEN;
-// Bounded, verifier-friendly byte copy — no memcpy with a
-// data-dependent length allowed here.
-#pragma unroll
-			for (u32 j = 0; j < SNI_MAX_LEN; j++) {
-				if (j >= copy_len)
-					break;
-				if (list + j >= (u8 *)data_end)
-					break;
-				sni_out[j] = list[j];
-			}
+			if (bpf_skb_load_bytes(skb, list_off, sni_out, copy_len) < 0)
+				return 0;
 			*sni_len_out = copy_len;
 			return 1;
 		}
 
-		p += ext_len;
+		off += ext_len;
 	}
 
 	return 0;
@@ -208,24 +206,13 @@ static __always_inline int try_parse_sni(void *data, void *data_end, char *sni_o
 
 SEC("socket")
 int mithril_snifilter(struct __sk_buff *skb) {
-	void *data = (void *)(long)skb->data;
-	// Not skb->data_end directly — per Gandalf's live verifier testing,
-	// this kernel (6.12.95+deb13) rejects reading data_end for a
-	// socket_filter attached to a connected TCP socket (SO_ATTACH_BPF),
-	// even though the offset itself (verified via disassembly) is
-	// correct and even though the kernel's own canonical sample,
-	// samples/bpf/sockex1_kern.c, reads data_end fine for the SAME
-	// program type — but that sample attaches to an AF_PACKET raw
-	// socket, a different attachment style with apparently different
-	// context field permissions. skb->len (offset 0, always permitted)
-	// gives an equivalent bound: data + len == data_end for the common
-	// case of linear TCP payload data reaching this filter. NOT
-	// necessarily exact for non-linear/paged skbs — the per-byte bounds
-	// checks throughout this file still apply against whatever this
-	// computes, so a slightly-wrong bound here doesn't defeat those,
-	// but this specific assumption (like the offset one before it)
-	// needs live confirmation, not just "the verifier accepted it."
-	void *data_end = data + skb->len;
+	// No skb->data/data_end anywhere in this file — per Gandalf's live
+	// verifier testing on this kernel (6.12.95+deb13), direct packet
+	// access is rejected entirely for a socket_filter attached to a
+	// connected TCP socket ("invalid bpf_context access off=76 size=4"
+	// for skb->data itself, after data_end alone was already rejected
+	// at offset 80). try_parse_sni below uses bpf_skb_load_bytes
+	// instead, which does its own bounds checking against skb->len.
 
 	u64 cookie = bpf_get_socket_cookie(skb);
 	if (cookie == 0)
@@ -252,7 +239,7 @@ int mithril_snifilter(struct __sk_buff *skb) {
 	// handshake completes, several packets later. Store the SNI and keep
 	// tracking bytes; see MAX_PACKETS_BEFORE_CLASSIFY.
 	if (!track->sni_extracted) {
-		if (try_parse_sni(data, data_end, track->sni, &track->sni_len))
+		if (try_parse_sni(skb, track->sni, &track->sni_len))
 			track->sni_extracted = 1;
 	}
 
