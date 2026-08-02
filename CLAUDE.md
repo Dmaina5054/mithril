@@ -24,7 +24,8 @@ Personal infrastructure stack — not Konnect, not work-related.
 
 - **Observability stack** — Prometheus + Grafana in Docker Compose,
   volume-mounted. Prometheus is localhost-only. Grafana is Tailscale-
-  accessible on port 3000. All scrape targets carry node= and workload=
+  accessible on port 3001 (moved off 3000 — that port belongs to the
+  Hermes WhatsApp bridge). All scrape targets carry node= and workload=
   labels. Future nodes (Gondor, Hermes) add a scrape config block —
   no new Grafana instance, no new dashboards from scratch.
 
@@ -84,8 +85,10 @@ These are enforced by Gandalf. Violations block the phase.
 
 | Port | Bind | Service |
 |---|---|---|
-| 3000 | 0.0.0.0 | Grafana (Tailscale) |
+| 3000 | 0.0.0.0 | Hermes WhatsApp bridge — **not** Mithril, do not reuse |
+| 3001 | 0.0.0.0 | Grafana (Tailscale) — moved from 3000, Hermes conflict, gated Session A Phase 4 |
 | 9090 | 127.0.0.1 | Prometheus |
+| 9100 | 0.0.0.0 | node_exporter — opened beyond localhost so the Prometheus container can reach it via host-gateway, gated Session A Phase 4 |
 | 1080 | 127.0.0.1 | socks5-proxy default |
 | 1081 | 127.0.0.1 | socks5-proxy shire-forge |
 | 9435 | 127.0.0.1 | ebpf-exporter |
