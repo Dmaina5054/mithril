@@ -6,9 +6,14 @@
 // Router that applies routing.yaml's geo/session rules per-request.
 // Phase 5: sock_ops eBPF program (per-process bandwidth accounting),
 // loaded on startup and unloaded on graceful shutdown per spec section 4.
-// eBPF failure is non-fatal — the core SOCKS5 proxy keeps running
-// without it (e.g. missing CAP_BPF, kernel too old); a bandwidth
-// accounting gap shouldn't take down request forwarding.
+// Phase 6: socket_filter eBPF program (SNI extraction + coarse flow
+// classification), attached per-connection via internal/proxy.SNIFilter;
+// results are read from a ring buffer by one long-lived goroutine here
+// and logged, per spec ("Go reads perf buffer, enriches proxy
+// connection log") — independent of any single connection's lifecycle.
+// eBPF failure is non-fatal for both — the core SOCKS5 proxy keeps
+// running without them (e.g. missing CAP_BPF, kernel too old); an
+// observability gap shouldn't take down request forwarding.
 package main
 
 import (
@@ -22,6 +27,7 @@ import (
 	"time"
 
 	"github.com/dmaina5054/mithril/proxy/config"
+	"github.com/dmaina5054/mithril/proxy/ebpf/snifilter"
 	"github.com/dmaina5054/mithril/proxy/ebpf/sockops"
 	"github.com/dmaina5054/mithril/proxy/internal/metrics"
 	"github.com/dmaina5054/mithril/proxy/internal/proxy"
@@ -53,6 +59,7 @@ func main() {
 	}
 
 	startEBPF(ctx)
+	startSNIFilter(ctx)
 
 	sessions := proxy.NewSessionStore() // shared across profiles — session keys are profile-username-prefixed, no collision risk
 
@@ -136,6 +143,53 @@ func startEBPF(ctx context.Context) {
 			log.Printf("mithril-proxy: eBPF cleanup error: %v", err)
 		} else {
 			log.Print("mithril-proxy: eBPF sock_ops unloaded")
+		}
+	}()
+}
+
+// startSNIFilter loads the socket_filter eBPF program and, if it loads,
+// sets proxy.SNIFilter so Handle attaches it to each accepted
+// connection, plus starts one long-lived goroutine reading the ring
+// buffer and logging {conn_id, sni, flow_type} events until ctx is
+// canceled. Non-fatal on failure, same as startEBPF. NOT LIVE-VERIFIED —
+// see ebpf/snifilter/loader.go's Tracker doc comment for the specific,
+// unresolved assumption about packet-offset semantics this needs a
+// privileged run to confirm or refute.
+func startSNIFilter(ctx context.Context) {
+	tracker, err := snifilter.Load()
+	if err != nil {
+		log.Printf("mithril-proxy: eBPF SNI socket filter disabled (kernel-side flow classification unavailable): %v", err)
+		return
+	}
+
+	reader, err := tracker.NewReader()
+	if err != nil {
+		log.Printf("mithril-proxy: eBPF SNI socket filter disabled (ring buffer reader failed): %v", err)
+		tracker.Close()
+		return
+	}
+
+	proxy.SNIFilter = tracker
+	log.Print("mithril-proxy: eBPF SNI socket filter enabled")
+
+	go func() {
+		for {
+			ev, err := reader.Read()
+			if err != nil {
+				log.Printf("mithril-proxy: sni-filter ring buffer closed: %v", err)
+				return
+			}
+			log.Printf("mithril-proxy: sni=%s flow_type=%s conn_id=%d (eBPF)", ev.SNI, ev.FlowType, ev.ConnID)
+		}
+	}()
+
+	go func() {
+		<-ctx.Done()
+		reader.Close()
+		if err := tracker.Close(); err != nil {
+			log.Printf("mithril-proxy: eBPF SNI socket filter cleanup error: %v", err)
+		} else {
+			log.Print("mithril-proxy: eBPF SNI socket filter unloaded")
 		}
 	}()
 }

@@ -6,9 +6,9 @@
 Shows all five eBPF-adjacent programs from spec section 4, their BPF
 maps, and how Go userspace reads each one — perf/ring buffers shown
 separately from hash maps since they're read completely differently
-(blocking epoll wait vs periodic polling). Only Feature 3 (sock_ops) and
-Feature 5 (Go SNI peek, no kernel) are built as of this phase; 2, 1, and
-4 are marked planned.
+(blocking epoll wait vs periodic polling). Updated in Phase 6: Feature 2
+(socket_filter) is now built alongside Feature 3 (sock_ops) and Feature
+5 (Go SNI peek). Features 1 and 4 remain planned.
 
 ---
 
@@ -16,7 +16,7 @@ Feature 5 (Go SNI peek, no kernel) are built as of this phase; 2, 1, and
 flowchart TB
     subgraph kernel["Kernel"]
         F3["Feature 3 — sock_ops\n(BUILT, Phase 5)\ncgroup v2 attach\nTCP send/recv byte tracking"]
-        F2["Feature 2 — socket_filter\n(PLANNED, Phase 6)\nTLS ClientHello SNI parse"]
+        F2["Feature 2 — socket_filter\n(BUILT, Phase 6)\nSO_ATTACH_BPF per-connection\nTLS ClientHello SNI parse"]
         F1["Feature 1 — tc/tproxy\n(PLANNED, Phase 7)\nredirect enforcement"]
         F4["Feature 4 — kprobe\n(PLANNED, Phase 8)\nzfs_read/zfs_write"]
     end
@@ -24,22 +24,24 @@ flowchart TB
     subgraph maps["BPF Maps"]
         M_ESTAB["established_sockets\nHASH, per-socket 4-tuple\n(internal bookkeeping only)"]
         M_PROC["process_bytes\nHASH, key=pid (u32)\nvalue={bytes_sent,bytes_recv}"]
+        M_CONNTRACK["conn_tracking\nHASH, key=socket cookie\n(internal bookkeeping only)"]
         M_PIDS["proxy_required_pids\nHASH (planned)"]
-        RB_SNI["perf ring buffer (planned)\n{conn_id, sni, flow_type}"]
+        RB_SNI["sni_events\nRINGBUF (BUILT)\n{conn_id, sni, flow_type}"]
         M_ZFS["zfs_io_snapshot\nARRAY, 1 entry (planned)"]
     end
 
     F3 --> M_ESTAB
     F3 --> M_PROC
+    F2 --> M_CONNTRACK
+    F2 --> RB_SNI
     F1 -.-> M_PIDS
-    F2 -.-> RB_SNI
     F4 -.-> M_ZFS
 
     subgraph userspace["Go Userspace (mithril-proxy)"]
         READER["sockops.Tracker.ReadProcessBytes()\n5s ticker poll (BUILT)"]
         EXPORT["internal/metrics.RunEBPFExporter\nCounterVec delta tracking (BUILT)"]
         SNIGO["internal/proxy.PeekSNI\npure Go, no kernel (BUILT, Phase 4)\ncomplements Feature 2"]
-        RBREAD["ring buffer reader (planned)\nblocking epoll, 1 goroutine"]
+        RBREAD["snifilter.Reader\nringbuf.NewReader, blocking epoll\n1 goroutine (BUILT, Phase 6)"]
         ZFSREAD["snapshot reader (planned)\nper-connection-close"]
     end
 
@@ -47,10 +49,11 @@ flowchart TB
     READER --> EXPORT
     EXPORT -->|"/metrics :9435"| PROM["Prometheus\nebpf-exporter job"]
 
-    RB_SNI -.->|"blocking epoll wait"| RBREAD
+    RB_SNI -->|"blocking epoll wait"| RBREAD
     M_ZFS -.->|"read at connection close"| ZFSREAD
 
-    SNIGO -.->|"enriches connection log\nindependent of kernel path"| LOG["proxy connection log"]
+    RBREAD -->|"logged directly, not\ncoupled to any one\nHandle() call"| LOG["proxy connection log"]
+    SNIGO -.->|"enriches connection log\nindependent of kernel path"| LOG
 ```
 
 ## Notes
@@ -92,3 +95,29 @@ flowchart TB
   diagram's title says "all five eBPF programs" per CLAUDE.md's diagram
   table wording, but Feature 5 itself has no kernel component to draw in
   the `kernel` subgraph, which is why it only appears in `userspace`.
+- **Feature 2's biggest open uncertainty, Phase 6**: the program is
+  attached directly to the client-facing TCP socket via
+  `link.AttachSocketFilter` (`SO_ATTACH_BPF`), not a raw `AF_PACKET`
+  capture. The assumption baked into `snifilter.c`'s parsing entry
+  point is that by the time a socket filter runs on a connected TCP
+  socket's receive path, `skb->data` already points at the application
+  payload (protocol headers stripped) — the same starting point
+  `internal/proxy/sni.go`'s parser expects. Kernel documentation doesn't
+  state this explicitly for TCP sockets specifically (it's well
+  documented for `AF_PACKET`, not for this attachment style); this is
+  reasoned from how `sock_queue_rcv_skb` fits into the TCP receive path,
+  not confirmed against a working reference example the way Phase 5's
+  `sock_ops` fix was. First thing to check if a live test extracts
+  garbage/empty SNI on connections known to carry TLS: try skipping a
+  fixed header-size offset (e.g. 54 bytes for Ethernet+IPv4+TCP) before
+  parsing instead.
+- **Flow classification is deliberately partial**: only `FLOW_IMAGE_UPLOAD`
+  (total bytes over 100KB within `MAX_PACKETS_BEFORE_CLASSIFY` packets)
+  is actually assigned by `snifilter.c`. `FLOW_API_CALL` and
+  `FLOW_TELEMETRY` are defined (matching spec's four named types) but
+  never produced — both need signals this receive-side, per-connection
+  filter structurally can't see: bidirectional byte counts (only inbound
+  is visible here) and/or cross-connection frequency ("New Relic
+  pattern" implies watching multiple connections over time). Both
+  surface as `FLOW_UNKNOWN`. Finer classification is Go-side future
+  work, not attempted in-kernel.

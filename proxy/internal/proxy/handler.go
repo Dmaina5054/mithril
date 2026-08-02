@@ -5,8 +5,32 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"syscall"
 	"time"
 )
+
+// SNIFilter, if set (by main.go, after successfully loading the eBPF
+// socket_filter program), gets attached to each accepted connection
+// alongside the pure-Go PeekSNI below — spec's two SNI mechanisms
+// (Feature 2 kernel-side, Feature 5 pure-Go) run side by side, neither
+// depends on the other. nil (the default) means the eBPF path is
+// unavailable (e.g. no root) and Handle skips it entirely — same
+// graceful-degradation approach as the sock_ops metrics path.
+//
+// Classification results are NOT read here: per spec, "Go reads perf
+// buffer, enriches proxy connection log" independently — main.go runs
+// one long-lived goroutine reading the ring buffer and logging events,
+// not coupled to any single Handle() call. Attach/detach is all this
+// package does.
+var SNIFilter SocketFilterAttacher
+
+// SocketFilterAttacher is satisfied by *snifilter.Tracker. Declared
+// here (not imported directly) so internal/proxy doesn't need to
+// import ebpf/snifilter just for this optional hook. Only AttachSocket
+// is needed — see the no-explicit-detach note in Handle below for why.
+type SocketFilterAttacher interface {
+	AttachSocket(conn syscall.Conn) error
+}
 
 // Resolver maps a client's requested Target to an upstream SOCKS5 address
 // and the credentials to authenticate with. Session B Phase 2 ships
@@ -70,6 +94,22 @@ func Handle(conn net.Conn, resolver Resolver) {
 	}
 
 	log.Printf("mithril-proxy: connected %s -> %s via %s", conn.RemoteAddr(), target.Addr(), upstreamAddr)
+
+	// eBPF SNI socket filter (Feature 2): attach if loaded. Only TCP
+	// connections implement syscall.Conn in a way link.AttachSocketFilter
+	// accepts — true for everything this proxy accepts, but checked
+	// rather than assumed. No explicit detach: Relay (below) closes conn
+	// itself as part of its own cleanup, so a deferred detach here would
+	// always run on an already-closed fd and always fail. Closing a
+	// socket already detaches any attached BPF filter as a matter of
+	// kernel socket teardown — nothing to do here beyond attaching.
+	if SNIFilter != nil {
+		if sc, ok := conn.(syscall.Conn); ok {
+			if err := SNIFilter.AttachSocket(sc); err != nil {
+				log.Printf("mithril-proxy: sni-filter attach failed for %s: %v", conn.RemoteAddr(), err)
+			}
+		}
+	}
 
 	// Go SNI peek (eBPF Feature 5): a pure-Go fallback/complement to the
 	// eBPF socket-filter SNI extractor, for when that filter fires too
