@@ -1,7 +1,7 @@
 # eBPF Enforcement Flow
 
 > Generated during: Session B, Phase 7 — Traffic Interception Enforcement
-> Last updated: 2026-08-02
+> Last updated: 2026-08-02 (gate PASSED — see final Notes bullet)
 
 Shows how an outbound connection attempt from a configured process gets
 transparently redirected through the proxy, and how the proxy recovers
@@ -83,15 +83,28 @@ flowchart TD
   `local_port` is known — `sk_original_dest` (SK_STORAGE) is scoped to
   that one socket and lets the second program read what the first one
   wrote.
-- **Highest unverified risk of any eBPF phase in this project.** Unlike
-  Phase 5 (had a working `cilium/ebpf` reference example) or Phase 6
-  (eventually got one narrowed down through live iteration), there is
-  no reference example for this specific `connect4` + `sk_storage` +
-  second-program-bridge pattern anywhere in the `cilium/ebpf` module
-  cache used throughout this build. Compiles clean and the byte-order
-  math (`ebpf/redirect/loader.go`'s `decodeOriginalDest`) is unit
-  tested against a from-scratch simulation, but none of the actual
-  kernel behavior — hook firing order, whether `local_port` is reliably
-  set by `TCP_CONNECT_CB` for a rewritten connection, whether
-  `bpf_sk_storage` bridges correctly across these two specific program
-  types — has run against a real kernel yet.
+- **Highest unverified risk of any eBPF phase in this project — now
+  verified.** Unlike Phase 5 (had a working `cilium/ebpf` reference
+  example) or Phase 6 (eventually got one narrowed down through live
+  iteration), there was no reference example for this specific
+  `connect4` + `sk_storage` + second-program-bridge pattern anywhere in
+  the `cilium/ebpf` module cache used throughout this build. Two
+  verifier rejections came up loading `mithril_redirect_sockops`
+  (`bpf_sk_storage_get` on `skops->sk`, `10: (85) call
+  bpf_sk_storage_get#107: R2 type=sock_or_null expected=sock_common,
+  sock, tcp_sock, xdp_sock, ptr_, trusted_ptr_`):
+  the first attempted fix, `bpf_sk_fullsock()`, doesn't exist in
+  `sock_ops`'s allowed helper set at all
+  (`bpf_sk_fullsock#95`). The actual cause: `skops->sk` is a raw
+  context field, and each C-level read of it re-triggers the context
+  conversion, handing the verifier a **fresh** `sock_or_null` register —
+  so a null check on one read never narrowed the type of a *separate*
+  read passed into the helper. Fix: bind `skops->sk` to a local
+  variable once and reuse that same register for the null check and
+  every helper call. With that fix, all five eBPF programs load and
+  attach clean, and a live run confirmed the full path against real
+  traffic: `connect4` rewrite → `sk_storage` bridge → `sockops`
+  correlation → transparent listener → SNI extraction → relay through
+  the IPRoyal upstream, for real connections (`claude.ai`,
+  `www.google.com`, `oauthaccountmanager.googleapis.com`, etc.) from
+  the one enforced PID.

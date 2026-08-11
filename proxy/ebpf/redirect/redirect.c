@@ -131,16 +131,27 @@ SEC("sockops")
 int mithril_redirect_sockops(struct bpf_sock_ops *skops) {
 	if (skops->op != BPF_SOCK_OPS_TCP_CONNECT_CB)
 		return 0;
-	if (!skops->sk)
+
+	// Read skops->sk into a local variable EXACTLY ONCE. bpf_sk_fullsock()
+	// isn't in sock_ops's allowed helper set, so that route is out — but
+	// the real bug isn't the pointer's type, it's that skops->sk is a raw
+	// context field: every C-level read of it re-triggers the context
+	// conversion and hands the verifier a brand-new sock_or_null register.
+	// A null check on one read doesn't narrow a different read's register,
+	// even though both come from the same field. Binding it to sk once and
+	// reusing that register everywhere is what lets the null check below
+	// narrow it to a definite (non-null) sock_common the helpers accept.
+	struct bpf_sock *sk = skops->sk;
+	if (!sk)
 		return 0;
 
-	struct original_dest *orig = bpf_sk_storage_get(&sk_original_dest, skops->sk, NULL, 0);
+	struct original_dest *orig = bpf_sk_storage_get(&sk_original_dest, sk, NULL, 0);
 	if (!orig)
 		return 0; // not a redirected connection — nothing to bridge
 
 	u16 local_port = (u16)skops->local_port;
 	bpf_map_update_elem(&redirect_targets, &local_port, orig, BPF_ANY);
-	bpf_sk_storage_delete(&sk_original_dest, skops->sk);
+	bpf_sk_storage_delete(&sk_original_dest, sk);
 
 	return 0;
 }

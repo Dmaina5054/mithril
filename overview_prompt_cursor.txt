@@ -1,0 +1,139 @@
+---
+You are an analyzer agent running inside Cursor with the repository source available on the local filesystem. The repository canonical URL for reference is: https://github.com/Dmaina5054/mithril (repo id 1319717122). You MUST NOT run privileged commands (no sudo, no modprobe, do not attempt to load eBPF, do not run privileged containers). Use only files in the workspace and command outputs you actually produce. For every factual claim cite exact file paths and line ranges or the command outputs you used.
+
+Before you run anything, set REPO to the path where the code is mounted. If unknown, detect it using the checks below and then continue.
+
+Repo root detection (run one of these, set REPO to the first successful result)
+- test -d /workspace/mithril && REPO=/workspace/mithril && echo "REPO=/workspace/mithril"
+- test -d /repo/mithril && REPO=/repo/mithril && echo "REPO=/repo/mithril"
+- test -d /mnt/data/mithril && REPO=/mnt/data/mithril && echo "REPO=/mnt/data/mithril"
+- # fallback: find repo by git remote
+  find /workspace -maxdepth 3 -type d -name mithril -print -quit | head -n1 | xargs -r -I{} echo "REPO={}"
+- If none of the above applies, set REPO=$PWD and continue.
+
+Record the exact command you used to set REPO and its output in the evidence appendix. If you cannot find the repo, immediately return an error with the commands and outputs you ran.
+
+Step 0 — non-privileged environment probe (run and include outputs)
+- echo "REPO=$REPO"
+- git -C "$REPO" rev-parse --abbrev-ref HEAD || true
+- git -C "$REPO" rev-parse --short HEAD || true
+- git -C "$REPO" remote -v || true
+- go version || true
+- rg --version || true
+- uname -a || true
+- cat /etc/os-release || true
+- uname -r || true
+
+Notes: Do NOT run sudo, docker info, modprobe, or other privileged commands. If any tests or build steps require privileged ops (e.g., loading eBPF, starting privileged containers), DO NOT run them — instead, capture the lines in Makefile / scripts that perform those privileged steps and mark them as "blocked by environment" with the exact file:line.
+
+Step 1 — top-level listing
+- ls -la "$REPO"
+- tree -L 2 "$REPO" || find "$REPO" -maxdepth 2 -print
+Paste the exact listing output.
+
+Step 2 — read primary docs (open & paste excerpts then summarize)
+For each file that exists, paste the first ~120 lines (or the specific lines you used) and then summarize claims and whether you could verify each claim in code:
+- README.md
+- CLAUDE.md
+- RUNNING.md or RUNBOOK.md
+- ARCHITECTURE.md
+- CHANGELOG.md
+- docs/* (including docs/mithril-infra-spec.* and docs/diagrams/*.md)
+
+When summarizing, always include the file path and line ranges you quoted, e.g., "README.md:1-80 — claim 'uses Debian Trixie' — verified by deploy/install.sh:12-34".
+
+Step 3 — inspect manifests & build files (read-only, do not run privileged builds)
+- Find and show contents (first ~200 lines) of:
+  - All go.mod files (find "$REPO" -name go.mod -exec sed -n '1,160p' {} \;)
+  - Makefile(s), justfile, Dockerfile(s)
+  - docker-compose.yml or docker-compose.*.yml
+  - .github/workflows/*.yml
+  - ebpf/Makefile or build scripts
+- For each Go module, run (if go is available):
+  - cd <module-path> && go list -m all  (capture output)
+  - cd <module-path> && go test ./...  (do NOT run if tests require network or privileged access; if you run them, capture output; if they fail due to network or environment, capture the failure)
+- For Docker or eBPF build steps: do NOT execute docker compose up or make that loads kernel modules. Instead, extract and paste the build commands from Makefile/Dockerfile and mark them as "requires privileged host" if they mention sudo, modprobe, ip link, or similar.
+
+Step 4 — open representative source files (read and summarize)
+Open and quote relevant entrypoints and representative files. For each directory present, open the entrypoint(s) and a few representative files and summarize responsibilities and key symbols. At minimum, check these (if they exist). If a path is absent, note "not present".
+
+- proxy/
+  - proxy/main.go or cmd/proxy/main.go — show func main (lines)
+  - proxy/internal/proxy/* — SOCKS5 handler(s), session management files
+  - proxy/internal/iproyal/* — any files referencing IPROYAL or upstream auth
+  - proxy/internal/metrics/*
+  - proxy/config/*
+- ebpf/
+  - ebpf/*.c — show first 200 lines of each C file
+  - ebpf/*loader*.go or bpf2go generated files — show first 200 lines
+  - ebpf/Makefile or build scripts — show commands but DO NOT run them
+- observability/, prometheus/, grafana/, monitoring/
+  - observability/config/prometheus.yml or prometheus/*.yml
+  - observability/docker-compose.yml — show the file; do not run compose up
+  - grafana/provisioning/*
+- deploy/
+  - systemd unit files, install scripts, packaging files
+- docs/ — any design notes referenced in README
+
+For each file you open, include file:path and line ranges used, e.g., "proxy/internal/iproyal/client.go:10-120 — implements token refresh".
+
+Step 5 — targeted searches (include full ripgrep outputs)
+Run these searches and paste full outputs (file:line:match). Use ripgrep or grep:
+- Entrypoints: rg -n "package main|func main" "$REPO"
+- Ports & binds: rg -n "127.0.0.1|0.0.0.0|:1080|:1081|:9090|:3000|:3001|:9100|:9999" "$REPO"
+- eBPF hints: rg -n "bpf2go|ebpf|BPF" "$REPO"
+- Secrets/tokens (non-exhaustive): rg -n "API_KEY|TOKEN|PASSWORD|SECRET|IPROYAL|IPROYAL_API" "$REPO"
+- Build/CI: rg -n "Makefile|justfile|docker-compose|Dockerfile|.github" "$REPO"
+- If ripgrep missing, use grep -RIn 'pattern' "$REPO"
+
+Step 6 — produce deliverables (required)
+Produce the following artifacts. Each claim must cite the specific files/lines or command outputs used as evidence.
+
+Deliverable A — Repository overview (use exact repo-overview format)
+- What this is (1–3 sentences)
+- Stack
+  - Languages (primary and meaningful secondary)
+  - Framework/runtime (Go version, native C eBPF, etc.)
+  - Notable libraries (3–5 prominent deps)
+- How it's organized
+  - Annotated top-level tree (code block)
+  - How it fits together (2–4 sentences naming real modules)
+- How to run it
+  - Shortest path from a fresh clone (or from this workspace) to a running process or to a blocked step. Show exact commands in a fenced block. For any blocked step (e.g., load eBPF, run privileged container), show the Makefile/Dockerfile lines that perform the action and mark them as "blocked by environment".
+
+Deliverable B — RUNNING.md (runbook)
+- Exact, copy-paste commands to run each major component locally within an unprivileged Cursor environment if possible (proxy, observability read-only commands, tests). If not possible, provide the commands and clearly label them "requires privileged host" and explain why (kernel requirement, root, docker socket). Include any env var names in .env.example or references in code.
+
+Deliverable C — Security & safety notes
+- Files containing secrets or token-like strings (file paths and matching line ranges)
+- Steps that require root or kernel capabilities (cite file:line)
+- Ports that bind to 0.0.0.0 vs localhost (cite file:line)
+
+Deliverable D — 8 follow-up questions for maintainers
+- Concrete, file-referenced follow-ups (e.g., "README.md:42 says 'start with docker compose' — which compose file? I found observability/docker-compose.yml:1-80, but it contains X; clarify intent.")
+
+Deliverable E — Evidence appendix
+- Exact commands you ran (with timestamps)
+- Full outputs of those commands (unabridged)
+- Full list of files you opened (path + line ranges)
+- Key file excerpts used as evidence (file:line)
+
+Step 7 — acceptance criteria (strict)
+- The overview must reference real files and line ranges (e.g., proxy/internal/iproyal/client.go:23-84).
+- For any build or run step that would require privileged operations, you MUST NOT run it. Instead, quote the commands from Makefile/Dockerfile and state "blocked by environment: requires root/Docker/kernel" with evidence.
+- Do not invent files or behavior; if something is referenced in docs but absent from tree, list it as "not present" with the doc line that references it.
+
+Formatting rules for your response
+- Start with the repo-overview section exactly in the format: "What this is", "Stack", "How it's organized", "How it fits together", "How to run it".
+- Provide RUNNING.md content as a separate section (or file block).
+- Provide Security notes, 8 follow-ups, then Evidence appendix.
+- Include file references like path/to/file and exact line ranges for every supporting quote.
+
+If you cannot read the repository root or a command errors, paste the exact error output and stop.
+
+End
+- When finished, produce the deliverables and the evidence appendix.
+- If you want me to collect this work instead, tell me the exact local path to the repository in Cursor (REPO) and confirm you want me to run the non-privileged evidence collection.
+
+---
+End of file
