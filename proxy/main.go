@@ -39,6 +39,7 @@ import (
 	"github.com/dmaina5054/mithril/proxy/ebpf/redirect"
 	"github.com/dmaina5054/mithril/proxy/ebpf/snifilter"
 	"github.com/dmaina5054/mithril/proxy/ebpf/sockops"
+	"github.com/dmaina5054/mithril/proxy/ebpf/zfs"
 	"github.com/dmaina5054/mithril/proxy/internal/metrics"
 	"github.com/dmaina5054/mithril/proxy/internal/proxy"
 )
@@ -70,6 +71,7 @@ func main() {
 
 	startEBPF(ctx)
 	startSNIFilter(ctx)
+	startZFSKprobe(ctx)
 
 	sessions := proxy.NewSessionStore() // shared across profiles — session keys are profile-username-prefixed, no collision risk
 
@@ -211,6 +213,40 @@ func startSNIFilter(ctx context.Context) {
 			log.Printf("mithril-proxy: eBPF SNI socket filter cleanup error: %v", err)
 		} else {
 			log.Print("mithril-proxy: eBPF SNI socket filter unloaded")
+		}
+	}()
+}
+
+// startZFSKprobe loads and attaches the ZFS I/O correlation kprobes
+// (eBPF Feature 4 — zfs_read/zfs_write entry/return) and sets
+// proxy.ZFSSnapshot so Handle reads the inflight counters at connection
+// close. Non-fatal on failure: if ZFS isn't loaded on this host (which
+// it isn't on the dev machine — ZFS lives on Minas Tirith), the kprobes
+// simply won't fire and counters stay at 0, but the proxy still runs.
+// NOT LIVE-VERIFIED — same root/CAP_BPF constraint as every other eBPF
+// feature. ZFS module presence can't be tested on this dev box at all.
+func startZFSKprobe(ctx context.Context) {
+	probes, err := zfs.Load()
+	if err != nil {
+		log.Printf("mithril-proxy: ZFS kprobe disabled (eBPF Feature 4 unavailable): %v", err)
+		return
+	}
+
+	if err := probes.AttachAll(); err != nil {
+		log.Printf("mithril-proxy: ZFS kprobe disabled (kprobe attach failed — ZFS likely not loaded on this host): %v", err)
+		probes.Close()
+		return
+	}
+
+	proxy.ZFSSnapshot = probes
+	log.Print("mithril-proxy: ZFS kprobes attached (zfs_read/zfs_write entry+return)")
+
+	go func() {
+		<-ctx.Done()
+		if err := probes.Close(); err != nil {
+			log.Printf("mithril-proxy: ZFS kprobe cleanup error: %v", err)
+		} else {
+			log.Print("mithril-proxy: ZFS kprobes unloaded")
 		}
 	}()
 }

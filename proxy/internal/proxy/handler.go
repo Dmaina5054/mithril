@@ -32,6 +32,22 @@ type SocketFilterAttacher interface {
 	AttachSocket(conn syscall.Conn) error
 }
 
+// ZFSReader is satisfied by *zfs.ProbeSet. Declared here so
+// internal/proxy doesn't need to import ebpf/zfs just for this optional
+// hook. ReadSnapshot returns the current ZFS inflight counters —
+// called after Relay finishes to correlate proxy connection duration
+// with concurrent ZFS I/O load.
+type ZFSReader interface {
+	ReadSnapshot() (readsInflight, writesInflight uint64, err error)
+}
+
+// ZFSSnapshot, if set (by main.go, after successfully loading the ZFS
+// kprobe), is read at connection close to enrich the proxy connection
+// log with ZFS inflight correlation data. nil (the default) means
+// ZFS kprobes aren't loaded (e.g. no root, ZFS not on this host) and
+// the log line omits ZFS fields entirely.
+var ZFSSnapshot ZFSReader
+
 // Resolver maps a client's requested Target to an upstream SOCKS5 address
 // and the credentials to authenticate with. Session B Phase 2 ships
 // StaticResolver (one fixed upstream/credential pair); Phase 3 replaces
@@ -132,6 +148,8 @@ func HandleTransparent(conn net.Conn, target Target, resolver Resolver) {
 // already dialed and conn is ready to have application data flow
 // through it (SOCKS5's reply already sent, if applicable).
 func attachSNIAndRelay(conn net.Conn, upstream net.Conn, target Target) {
+	start := time.Now()
+
 	// eBPF SNI socket filter (Feature 2): attach if loaded. Only TCP
 	// connections implement syscall.Conn in a way link.AttachSocketFilter
 	// accepts — true for everything this proxy accepts, but checked
@@ -173,6 +191,23 @@ func attachSNIAndRelay(conn net.Conn, upstream net.Conn, target Target) {
 	}
 
 	Relay(buffered, upstream)
+
+	// ZFS I/O correlation (eBPF Feature 4): read inflight counters at
+	// connection close. This gives a point-in-time snapshot of ZFS
+	// concurrency at the moment the connection finished — a correlative
+	// signal, not a precise measurement. Skipped entirely when ZFS
+	// kprobes aren't loaded (ZFSSnapshot == nil, the default).
+	if ZFSSnapshot != nil {
+		reads, writes, err := ZFSSnapshot.ReadSnapshot()
+		if err != nil {
+			log.Printf("mithril-proxy: zfs snapshot read error for %s: %v", conn.RemoteAddr(), err)
+		} else {
+			log.Printf("mithril-proxy: conn=%s->%s duration_ms=%d zfs_reads=%d zfs_writes=%d",
+				conn.RemoteAddr(), target.Addr(),
+				time.Since(start).Milliseconds(),
+				reads, writes)
+		}
+	}
 }
 
 // bufferedConn is a net.Conn whose Read goes through a bufio.Reader
