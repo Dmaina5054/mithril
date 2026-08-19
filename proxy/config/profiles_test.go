@@ -98,3 +98,60 @@ func TestValidate_RejectsEmptyProfiles(t *testing.T) {
 		t.Fatal("expected error for empty profiles map, got nil")
 	}
 }
+
+func TestLoadProfilesConfig_NonIPRoyalProviderSkipsLegacyValidation(t *testing.T) {
+	// A profile naming a different provider doesn't need top-level
+	// username/password at all — its provider_config is opaque to this
+	// package, validated later by that provider's own factory.
+	p := writeTempProfiles(t, `
+profiles:
+  tor:
+    provider: socks5
+    listen_port: 1082
+    provider_config:
+      upstream_addr: "127.0.0.1:9050"
+`)
+	cfg, err := LoadProfilesConfig(p)
+	if err != nil {
+		t.Fatalf("LoadProfilesConfig: %v", err)
+	}
+	tor := cfg.Profiles["tor"]
+	if tor.Provider != "socks5" {
+		t.Errorf("Provider = %q, want socks5", tor.Provider)
+	}
+	if tor.ProviderConfig["upstream_addr"] != "127.0.0.1:9050" {
+		t.Errorf("ProviderConfig = %+v, missing upstream_addr", tor.ProviderConfig)
+	}
+}
+
+func TestLoadProfilesConfig_ExplicitIPRoyalProviderConfigSkipsLegacyValidation(t *testing.T) {
+	// provider: iproyal explicitly, credentials under provider_config
+	// rather than the legacy top-level fields — also should not trip
+	// the top-level username/password requirement.
+	p := writeTempProfiles(t, `
+profiles:
+  default:
+    provider: iproyal
+    listen_port: 1080
+    provider_config:
+      username: "u"
+      password: "p"
+      upstream_addr: "entry.iproyal.example:12345"
+`)
+	if _, err := LoadProfilesConfig(p); err != nil {
+		t.Fatalf("LoadProfilesConfig: %v", err)
+	}
+}
+
+func TestValidate_LegacyIPRoyalProfileStillRequiresCredentials(t *testing.T) {
+	// No provider field and no provider_config — the pre-plugin-layer
+	// shape — must still require username/password exactly as before.
+	p := writeTempProfiles(t, `
+profiles:
+  default:
+    listen_port: 1080
+`)
+	if _, err := LoadProfilesConfig(p); err == nil {
+		t.Fatal("expected error for legacy profile missing username/password, got nil")
+	}
+}

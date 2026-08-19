@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"log"
 	"net"
@@ -48,27 +49,33 @@ type ZFSReader interface {
 // the log line omits ZFS fields entirely.
 var ZFSSnapshot ZFSReader
 
-// Resolver maps a client's requested Target to an upstream SOCKS5 address
-// and the credentials to authenticate with. Session B Phase 2 ships
-// StaticResolver (one fixed upstream/credential pair); Phase 3 replaces
-// it with the geo/session-aware router — Handle doesn't change.
+// Resolver establishes an upstream connection for a client's requested
+// Target. StaticResolver (below) is the simplest implementation — one
+// fixed upstream/credential pair, predating routing.yaml entirely.
+// *Router (router.go) is the real one: it matches routing.yaml's geo/
+// session rules and delegates the actual dial to a
+// vpnprovider.Provider, so swapping the upstream VPN/proxy vendor never
+// requires a Resolver or Handle change — see
+// docs/diagrams/provider-plugin-architecture.md.
 type Resolver interface {
-	Resolve(target Target) (upstreamAddr string, creds Credentials, err error)
+	Dial(ctx context.Context, target Target, timeout time.Duration) (net.Conn, error)
 }
 
-// StaticResolver always returns the same upstream and credentials,
-// regardless of target. Sufficient to prove the SOCKS5 core end-to-end
-// (Phase 2 gate); Phase 3 replaces this with real geo/session routing.
+// StaticResolver always dials the same upstream with the same
+// credentials, regardless of target. Sufficient to prove the SOCKS5
+// core end-to-end without any routing or provider-plugin machinery —
+// used by tests and small standalone setups, not by main.go anymore
+// (which always goes through *Router, even for a single-profile setup).
 type StaticResolver struct {
 	UpstreamAddr string
 	Creds        Credentials
 }
 
-func (s StaticResolver) Resolve(_ Target) (string, Credentials, error) {
+func (s StaticResolver) Dial(_ context.Context, target Target, timeout time.Duration) (net.Conn, error) {
 	if s.UpstreamAddr == "" {
-		return "", Credentials{}, fmt.Errorf("static resolver: no upstream address configured")
+		return nil, fmt.Errorf("static resolver: no upstream address configured")
 	}
-	return s.UpstreamAddr, s.Creds, nil
+	return DialUpstream(s.UpstreamAddr, s.Creds, target, timeout)
 }
 
 // DialTimeout is the upstream connect timeout. Var, not const, so tests
@@ -76,9 +83,9 @@ func (s StaticResolver) Resolve(_ Target) (string, Credentials, error) {
 var DialTimeout = 15 * time.Second
 
 // Handle services one accepted local SOCKS5 connection end-to-end:
-// server-side SOCKS5 handshake, resolve the upstream, dial+auth
-// upstream, reply to the local client, then relay bytes until either
-// side closes.
+// server-side SOCKS5 handshake, resolve+dial the upstream (via
+// resolver, whatever it's backed by), reply to the local client, then
+// relay bytes until either side closes.
 func Handle(conn net.Conn, resolver Resolver) {
 	target, err := ServerHandshake(conn)
 	if err != nil {
@@ -87,17 +94,9 @@ func Handle(conn net.Conn, resolver Resolver) {
 		return
 	}
 
-	upstreamAddr, creds, err := resolver.Resolve(target)
+	upstream, err := resolver.Dial(context.Background(), target, DialTimeout)
 	if err != nil {
-		log.Printf("mithril-proxy: resolve error for %s: %v", target.Addr(), err)
-		_ = writeReply(conn, replyGeneralFailure)
-		conn.Close()
-		return
-	}
-
-	upstream, err := DialUpstream(upstreamAddr, creds, target, DialTimeout)
-	if err != nil {
-		log.Printf("mithril-proxy: upstream dial error for %s via %s: %v", target.Addr(), upstreamAddr, err)
+		log.Printf("mithril-proxy: upstream dial error for %s: %v", target.Addr(), err)
 		_ = writeReply(conn, replyGeneralFailure)
 		conn.Close()
 		return
@@ -110,7 +109,7 @@ func Handle(conn net.Conn, resolver Resolver) {
 		return
 	}
 
-	log.Printf("mithril-proxy: connected %s -> %s via %s", conn.RemoteAddr(), target.Addr(), upstreamAddr)
+	log.Printf("mithril-proxy: connected %s -> %s", conn.RemoteAddr(), target.Addr())
 	attachSNIAndRelay(conn, upstream, target)
 }
 
@@ -124,21 +123,14 @@ func Handle(conn net.Conn, resolver Resolver) {
 // dial, eBPF/Go SNI, relay — is identical to the SOCKS5 path, hence
 // sharing attachSNIAndRelay rather than duplicating it.
 func HandleTransparent(conn net.Conn, target Target, resolver Resolver) {
-	upstreamAddr, creds, err := resolver.Resolve(target)
+	upstream, err := resolver.Dial(context.Background(), target, DialTimeout)
 	if err != nil {
-		log.Printf("mithril-proxy: (transparent) resolve error for %s: %v", target.Addr(), err)
+		log.Printf("mithril-proxy: (transparent) upstream dial error for %s: %v", target.Addr(), err)
 		conn.Close()
 		return
 	}
 
-	upstream, err := DialUpstream(upstreamAddr, creds, target, DialTimeout)
-	if err != nil {
-		log.Printf("mithril-proxy: (transparent) upstream dial error for %s via %s: %v", target.Addr(), upstreamAddr, err)
-		conn.Close()
-		return
-	}
-
-	log.Printf("mithril-proxy: (transparent) connected %s -> %s via %s", conn.RemoteAddr(), target.Addr(), upstreamAddr)
+	log.Printf("mithril-proxy: (transparent) connected %s -> %s", conn.RemoteAddr(), target.Addr())
 	attachSNIAndRelay(conn, upstream, target)
 }
 

@@ -24,15 +24,25 @@ stronger than it looks.
 
 Go SOCKS5 consumer proxy. Apps on localhost point at `:1080` (default)
 or `:1081` (shire-forge workload). The proxy handles the upstream
-connection to IPRoyal, including:
+connection, including:
 
 - Credential construction with geo-targeting and session mode per route
-- Sub-user isolation — each workload profile has its own IPRoyal
+- Sub-user isolation — each workload profile has its own upstream
   sub-user and bandwidth allocation
 - Sticky vs rotating session management per destination pattern
-- Entry node benchmarking — picks the lowest-latency IPRoyal node
-  on startup and re-benchmarks every 6 hours
-- Bandwidth monitoring via the IPRoyal API, exposed as Prometheus metrics
+- Entry node benchmarking — picks the lowest-latency entry node
+  on startup and re-benchmarks every 6 hours (IPRoyal provider)
+- Bandwidth monitoring via the upstream's API, exposed as Prometheus metrics
+
+IPRoyal isn't hardcoded: `internal/vpnprovider` is a small plugin layer
+(`Provider` interface + name-based registry, `database/sql`-driver
+style) that everything above actually talks to. `internal/vpnprovider/iproyal`
+is the reference implementation; `internal/vpnprovider/genericsocks5`
+is a second, much simpler one (any plain SOCKS5 upstream, no geo/session
+targeting) included to prove the interface isn't IPRoyal-shaped. Each
+`profiles.yaml` entry picks a provider by name — see
+`proxy/config/profiles.yaml.example` and
+`docs/diagrams/provider-plugin-architecture.md`.
 
 Runs as a systemd service on the host. Not in Docker — needs direct
 access to the network interface for eBPF programs.
