@@ -2,10 +2,11 @@
 
 > Generated during: unscheduled — `internal/vpnprovider` plugin layer.
 > Not one of the original Session B phases in `docs/mithril-infra-spec.docx`
-> (that spec assumes IPRoyal throughout); added afterward so a second
-> upstream VPN/residential-proxy vendor can be hooked in without
+> (that spec assumes IPRoyal throughout); added afterward so upstream
+> VPN/residential-proxy vendors beyond IPRoyal can be hooked in without
 > touching `internal/proxy`.
-> Last updated: 2026-08-19
+> Last updated: 2026-08-19 — added `internal/vpnprovider/brightdata` as
+> a real third-party integration test of the plugin boundary (see Notes).
 
 Shows the plugin boundary this refactor introduced between the SOCKS5
 core (`internal/proxy`) and any upstream VPN/proxy vendor
@@ -26,7 +27,7 @@ flowchart TD
     end
 
     subgraph mainpkg["main.go"]
-        BLANK["blank imports:\n_ vpnprovider/iproyal\n_ vpnprovider/genericsocks5\n(registers both at init())"]
+        BLANK["blank imports:\n_ vpnprovider/iproyal\n_ vpnprovider/genericsocks5\n_ vpnprovider/brightdata\n(registers all three at init())"]
         BUILD["buildProvider(profile)\n-> vpnprovider.New(name, config)"]
     end
 
@@ -43,9 +44,10 @@ flowchart TD
     end
 
     subgraph providers["Provider implementations"]
-        IPROYAL["internal/vpnprovider/iproyal\nencodes RouteOptions into an\nIPRoyal password suffix,\nthen calls proxy.DialUpstream"]
+        IPROYAL["internal/vpnprovider/iproyal\nencodes RouteOptions into an\nIPRoyal password SUFFIX,\nthen calls proxy.DialUpstream"]
         SOCKS5P["internal/vpnprovider/genericsocks5\nignores RouteOptions entirely,\ncalls proxy.DialUpstream with a\nstatic user/pass (or no-auth)"]
-        FUTURE["A THIRD provider\n(not yet written) — e.g. a vendor\nwith its own entry-node API, or a\nnon-SOCKS5 wire protocol —\nimplements Provider directly,\ndoes not have to use DialUpstream"]
+        BRIGHTDATA["internal/vpnprovider/brightdata\nencodes RouteOptions into a\nBright Data USERNAME (opposite\nhalf of the credential pair vs.\niproyal), fixed vendor host,\nvalidates port>1024 + no IP\nliterals, then calls proxy.DialUpstream"]
+        FUTURE["A FOURTH provider\n(not yet written) — e.g. a vendor\nwith its own entry-node API, or a\nnon-SOCKS5 wire protocol —\nimplements Provider directly,\ndoes not have to use DialUpstream"]
     end
 
     PCFG --> BUILD
@@ -57,9 +59,11 @@ flowchart TD
     HANDLE --> ROUTER
     IFACE -.implemented by.-> IPROYAL
     IFACE -.implemented by.-> SOCKS5P
+    IFACE -.implemented by.-> BRIGHTDATA
     IFACE -.implemented by.-> FUTURE
     IPROYAL --> DIALUP
     SOCKS5P --> DIALUP
+    BRIGHTDATA --> DIALUP
     FUTURE -.->|may skip DialUpstream\nentirely| IFACE
 ```
 
@@ -111,6 +115,40 @@ flowchart TD
   (like `internal/iproyal.Client` does for IPRoyal, though that client
   isn't wired into the hot path yet either) or a different wire
   protocol, that logic lives entirely inside the new package.
+- **`internal/vpnprovider/brightdata` is the actual proof of that last
+  bullet**, not just a description of it — a real vendor (Bright Data),
+  confirmed against its live docs (docs.brightdata.com), added purely
+  to stress-test the plugin boundary rather than to fill a specific
+  operational need. It turned out to differ from IPRoyal in exactly
+  the ways worth testing:
+  - **Targeting lives in the USERNAME, not the password.** IPRoyal's
+    `buildPassword` appends `_country-us_session-abc123` to the
+    password; Bright Data's `buildUsername` appends
+    `-country-us-session-abc123` to the username instead, and the
+    password is sent completely unmodified. `RouteOptions` didn't need
+    a single field changed to support either direction — it's the
+    provider's `Dial` that decides which half of the credential pair
+    carries what.
+  - **No per-account entry-node discovery.** IPRoyal's `Config` needs
+    an operator-supplied `upstream_addr` (an entry node — see
+    `iproyal-api-integration.md`); Bright Data's proxy is a single
+    fixed vendor host (`brd.superproxy.io:22228` for SOCKS5), so
+    `brightdata.Config` doesn't have a required upstream-address field
+    at all (only an optional override, mainly for tests).
+  - **Real vendor-specific constraints, enforced before the dial, not
+    after.** Bright Data's SOCKS5 endpoint rejects target ports ≤ 1024
+    and IP-literal targets outright; `brightdata.Provider.Dial`
+    validates both and returns a clear error naming the constraint,
+    rather than letting the real upstream fail confusingly.
+  - **No lifetime or force-random equivalent.** Bright Data controls
+    sticky-session duration from the zone dashboard, not a per-request
+    username parameter — `RouteOptions.Lifetime`/`ForceRandom` are
+    silently ignored here, the same "ignore what you can't act on"
+    contract `genericsocks5` already demonstrated for the "ignore
+    everything" extreme.
+  - It still reuses `proxy.DialUpstream` — Bright Data's SOCKS5
+    endpoint is standard RFC 1928/1929, so the wire protocol itself
+    needed nothing new.
 - This diagram doesn't cover `internal/iproyal.Client` (the REST API for
   `/me`, `/access/entry-nodes`, `/residential-subusers`,
   `/access/countries`) — see `docs/diagrams/iproyal-api-integration.md`.

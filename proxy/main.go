@@ -58,6 +58,7 @@ import (
 	// (see internal/vpnprovider.Register). This is the only place a new
 	// provider package needs to be wired in; profiles.yaml selects one
 	// by the name it registers under.
+	_ "github.com/dmaina5054/mithril/proxy/internal/vpnprovider/brightdata"
 	_ "github.com/dmaina5054/mithril/proxy/internal/vpnprovider/genericsocks5"
 	_ "github.com/dmaina5054/mithril/proxy/internal/vpnprovider/iproyal"
 )
