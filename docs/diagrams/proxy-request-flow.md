@@ -98,8 +98,8 @@ flowchart TD
     ROUTING --> LOADCFG
     ENVFILE --> LOADCFG
     LOADCFG --> BUILDPROV
-    BLANKIMPORT -.registers at init, before main runs.-> PROVIF
-    BUILDPROV -->|vpnprovider.New(name, config)| PROVIF
+    BLANKIMPORT -.->|"registers at init, before main runs"| PROVIF
+    BUILDPROV -->|"vpnprovider.New by provider name"| PROVIF
     BUILDPROV --> L1080
     BUILDPROV --> L1081
     BUILDPROV --> LDOTS
@@ -119,10 +119,10 @@ flowchart TD
     L1081 --> HANDLE
     LDOTS --> HANDLE
     HANDLE --> ROUTERDIAL
-    ROUTERDIAL -->|RouteOptions| PROVIF
-    PROVIF -.implemented by.-> IPROYALP
-    PROVIF -.implemented by.-> BRIGHTP
-    PROVIF -.implemented by.-> SOCKSP
+    ROUTERDIAL -->|"RouteOptions"| PROVIF
+    PROVIF -.->|"implemented by"| IPROYALP
+    PROVIF -.->|"implemented by"| BRIGHTP
+    PROVIF -.->|"implemented by"| SOCKSP
     IPROYALP --> IPROYALU
     BRIGHTP --> BRIGHTU
     SOCKSP --> OTHERU
@@ -130,22 +130,22 @@ flowchart TD
     BRIGHTU --> DEST
     OTHERU --> DEST
     HANDLE --> SNIPEEK
-    HANDLE -->|attach eBPF filter to conn| SNIFILTER
-    HANDLE -->|read snapshot at close| ZFSKPROBE
+    HANDLE -->|"attach eBPF filter to conn"| SNIFILTER
+    HANDLE -->|"read snapshot at close"| ZFSKPROBE
     HANDLE --> RELAY
-    RELAY -->|bidirectional copy| DEST
-    HANDLE -.on handshake/dial/reply failure.-> PMETRICS
+    RELAY -->|"bidirectional copy"| DEST
+    HANDLE -.->|"on handshake, dial, or reply failure"| PMETRICS
 
     %% --- transparent path ---
-    REDIRECTPROC -->|connect() intercepted\nby connect4 hook| REDIRECT
-    REDIRECT -->|rewrite dest to| TLISTEN
+    REDIRECTPROC -->|"connect syscall intercepted\nby connect4 hook"| REDIRECT
+    REDIRECT -->|"rewrite dest to"| TLISTEN
     TLISTEN --> HANDLETRANS
     HANDLETRANS --> ROUTERDIAL
 
     %% --- observability ---
     SOCKOPS --> EMETRICS
-    PMETRICS -->|scraped| PROMSTACK
-    EMETRICS -->|scraped| PROMSTACK
+    PMETRICS -->|"scraped"| PROMSTACK
+    EMETRICS -->|"scraped"| PROMSTACK
 ```
 
 ## Notes
