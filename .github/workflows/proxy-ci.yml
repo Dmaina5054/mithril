@@ -20,6 +20,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: proxy/go.mod
+          cache-dependency-path: proxy/go.sum
 
       # bpf2go's default C compiler ("-cc clang") and default strip
       # tool ("llvm-strip") — clang is preinstalled on ubuntu-latest
