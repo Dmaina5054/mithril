@@ -25,7 +25,7 @@ flowchart LR
         TSDB[("TSDB\n90d retention")]
     end
 
-    subgraph graf["Grafana :3000 — Tailscale-accessible"]
+    subgraph graf["Grafana :3001 — Tailscale-accessible"]
         DS["Prometheus datasource\n(provisioned as-code)"]
         DASH["Dashboards\nKioo Labs / Proxy Network /\nMinas Tirith Infra / eBPF"]
         ALERT["Grafana alerting\n(notifications)"]

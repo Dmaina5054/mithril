@@ -19,7 +19,7 @@ flowchart TB
 
         subgraph compose["docker compose — network: observability"]
             PROM["prometheus\n0.0.0.0:9090 in container\npublished 127.0.0.1:9090"]
-            GRAF["grafana\n0.0.0.0:3000 in container\npublished 0.0.0.0:3000"]
+            GRAF["grafana\n0.0.0.0:3000 in container\npublished 0.0.0.0:3001"]
 
             PROM -- "extra_hosts:\nhost.docker.internal → host-gateway" --> NE
             PROM --> SP
@@ -40,16 +40,18 @@ flowchart TB
         GRAF --- CFGG
     end
 
-    TS["Tailscale network"] -- ":3000 only" --> GRAF
+    TS["Tailscale network"] -- ":3001 only" --> GRAF
 ```
 
 ## Notes
 
 - Prometheus is published as `127.0.0.1:9090` — reachable from the host
   for local `curl`/debugging, never from Tailscale or the LAN.
-- Grafana is published as `0.0.0.0:3000` and is the only container
-  exposed beyond localhost; Tailscale ACLs (not shown) are what actually
-  restrict who on the tailnet can reach it.
+- Grafana is published as `0.0.0.0:3001` (container-internal port 3000,
+  mapped to host port 3001 — moved off 3000, which belongs to the
+  Hermes WhatsApp bridge on this host, see `CLAUDE.md`'s port registry)
+  and is the only container exposed beyond localhost; Tailscale ACLs
+  (not shown) are what actually restrict who on the tailnet can reach it.
 - `host.docker.internal` requires the explicit `extra_hosts:
   host.docker.internal:host-gateway` entry on the `prometheus` service
   because this is Linux Docker Engine, not Docker Desktop — without it

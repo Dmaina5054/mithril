@@ -79,7 +79,8 @@ docker compose up -d
 ```
 
 Prometheus is localhost-only (no auth — never expose it externally).
-Grafana is accessible on your Tailscale network at port 3000.
+Grafana is accessible on your Tailscale network at port 3001 (moved
+off 3000, which belongs to the Hermes WhatsApp bridge on this host).
 
 All scrape targets carry `node=` and `workload=` labels. Adding a
 new node or workload is one scrape config block — no new Grafana
@@ -124,7 +125,7 @@ docker compose up -d
 
 # Verify
 curl http://localhost:9090/-/healthy
-# Grafana at http://<tailscale-hostname>:3000
+# Grafana at http://<tailscale-hostname>:3001
 ```
 
 ### Deploying to Minas Tirith
@@ -137,10 +138,11 @@ cd mithril
 # Build
 cd proxy && make build
 
-# Install node_exporter with ZFS collector
-apt install prometheus-node-exporter
-echo 'ARGS="--collector.zfs"' >> /etc/default/prometheus-node-exporter
-systemctl restart prometheus-node-exporter
+# Install node_exporter with ZFS collector (downloads the upstream
+# release directly and creates a user systemd service — see the
+# script for exactly what it does; it does NOT use the
+# prometheus-node-exporter apt package)
+bash ../deploy/install-node-exporter.sh
 
 # Start observability stack
 cd ../observability
@@ -181,7 +183,7 @@ The Docker Compose setup maps directly to Kubernetes:
 | .env file | Secret |
 | depends_on | readinessProbe |
 | ports: 127.0.0.1:9090 | ClusterIP Service |
-| ports: 0.0.0.0:3000 | NodePort or Ingress |
+| ports: 0.0.0.0:3001 | NodePort or Ingress |
 
 When Gondor is ready, migrate the stack there as a CKA learning exercise.
 The data in the volumes comes with it.
