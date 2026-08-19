@@ -1,4 +1,16 @@
 # config/alerts/proxy.yml
+#
+# NOT YET WIRED UP: IPRoyalBandwidthLow and IPRoyalSubuserExhausted
+# below reference iproyal_subuser_traffic_available_gb, which nothing
+# currently exports — internal/iproyal.Client (GET /residential-
+# subusers) exists but isn't polled into a Prometheus metric anywhere
+# yet (see proxy/internal/iproyal/client.go's package doc comment and
+# proxy/cmd/apismoke, the only thing that calls it today). Until that
+# polling exists these two rules simply never fire (Prometheus treats
+# a query against a nonexistent metric as "no data", not an error) —
+# left in place as the target shape for when that's built, same as
+# the "PLACEHOLDER METRIC" panel in config/grafana/provisioning/
+# dashboards/Proxy Network/iproyal-bandwidth.json.
 groups:
   - name: proxy
     rules:

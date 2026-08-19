@@ -5,6 +5,8 @@ import (
 	"net"
 	"testing"
 	"time"
+
+	"github.com/dmaina5054/mithril/proxy/internal/metrics"
 )
 
 // TestHandle_ShortPayloadDoesNotStallRelay is a regression test for a
@@ -91,5 +93,50 @@ func TestHandle_ShortPayloadDoesNotStallRelay(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("short payload did not reach upstream within 2s — relay stalled inside PeekSNI (regression)")
+	}
+}
+
+// TestHandle_DialErrorRecordsConnectionErrorMetric proves Handle's
+// dial-failure path actually increments proxy_connection_errors_total —
+// the metric internal/metrics/proxy.go exposes on :9998 and
+// observability/config/alerts/proxy.yml's HighConnectionErrorRate alert
+// depends on.
+func TestHandle_DialErrorRecordsConnectionErrorMetric(t *testing.T) {
+	// A listener that's already closed before Handle ever dials it
+	// guarantees DialUpstream fails with "connection refused" —
+	// deterministic, no reliance on a real network timeout.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	addr := ln.Addr().String()
+	ln.Close()
+
+	before := metrics.ConnectionErrorCount("dial")
+
+	client, server := net.Pipe()
+	defer client.Close()
+
+	resolver := StaticResolver{UpstreamAddr: addr, Creds: Credentials{Username: "u", Password: "p"}}
+	go Handle(server, resolver)
+
+	client.SetDeadline(time.Now().Add(3 * time.Second))
+	writeAll(t, client, []byte{socks5Version, 1, methodNoAuth})
+	readAndCheck(t, client, []byte{socks5Version, methodNoAuth})
+
+	host := "target.com"
+	req := []byte{socks5Version, cmdConnect, 0x00, atypDomain, byte(len(host))}
+	req = append(req, host...)
+	req = append(req, 0x01, 0xBB)
+	writeAll(t, client, req)
+
+	reply := make([]byte, 10)
+	readFull(t, client, reply)
+	if reply[1] != replyGeneralFailure {
+		t.Fatalf("CONNECT reply code = 0x%02x, want general failure", reply[1])
+	}
+
+	if after := metrics.ConnectionErrorCount("dial"); after != before+1 {
+		t.Errorf("proxy_connection_errors_total{reason=dial} = %v, want %v", after, before+1)
 	}
 }

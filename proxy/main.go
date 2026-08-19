@@ -49,6 +49,7 @@ import (
 	"github.com/dmaina5054/mithril/proxy/ebpf/snifilter"
 	"github.com/dmaina5054/mithril/proxy/ebpf/sockops"
 	"github.com/dmaina5054/mithril/proxy/ebpf/zfs"
+	"github.com/dmaina5054/mithril/proxy/internal/health"
 	"github.com/dmaina5054/mithril/proxy/internal/metrics"
 	"github.com/dmaina5054/mithril/proxy/internal/proxy"
 	"github.com/dmaina5054/mithril/proxy/internal/vpnprovider"
@@ -88,6 +89,8 @@ func main() {
 	startEBPF(ctx)
 	startSNIFilter(ctx)
 	startZFSKprobe(ctx)
+	startHealthz()
+	startProxyMetrics()
 
 	sessions := proxy.NewSessionStore() // shared across profiles — session keys are profile-name-prefixed, no collision risk
 
@@ -268,6 +271,37 @@ func startZFSKprobe(ctx context.Context) {
 			log.Printf("mithril-proxy: ZFS kprobe cleanup error: %v", err)
 		} else {
 			log.Print("mithril-proxy: ZFS kprobes unloaded")
+		}
+	}()
+}
+
+// startHealthz starts the /healthz endpoint (internal/health) on
+// :9999. Unlike startEBPF/startSNIFilter/startZFSKprobe/
+// startRedirectEnforcement, there's no privileged-load step gating
+// this — it has no eBPF or provider dependency and is always
+// available. A bind failure (e.g. port already in use) is still
+// logged and non-fatal rather than crashing the whole proxy, matching
+// this file's overall "an observability gap shouldn't take down
+// request forwarding" philosophy.
+func startHealthz() {
+	const addr = "127.0.0.1:9999"
+	go func() {
+		if err := health.Serve(addr); err != nil {
+			log.Printf("mithril-proxy: /healthz server stopped: %v", err)
+		}
+	}()
+}
+
+// startProxyMetrics starts the main proxy's own /metrics endpoint
+// (proxy_connection_errors_total today — see
+// internal/metrics/proxy.go — on its own registry, deliberately
+// separate from :9435's eBPF exporter). Same non-fatal-on-bind-failure
+// treatment as startHealthz.
+func startProxyMetrics() {
+	const addr = "127.0.0.1:9998"
+	go func() {
+		if err := metrics.ServeProxyMetrics(addr); err != nil {
+			log.Printf("mithril-proxy: /metrics server stopped: %v", err)
 		}
 	}()
 }
