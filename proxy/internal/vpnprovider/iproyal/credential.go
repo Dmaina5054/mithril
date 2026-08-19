@@ -1,15 +1,24 @@
-package proxy
+package iproyal
 
 import (
 	"fmt"
 	"strings"
 )
 
-// CredentialOptions encodes IPRoyal's password-suffix targeting keys —
+// credentialOptions encodes IPRoyal's password-suffix targeting keys —
 // confirmed against docs.iproyal.com/proxies/residential/proxy/location
 // and .../rotation. Location/session parameters go in the PASSWORD
 // field, not the username: "password321_country-br_session-sgn34f3e_lifetime-10m".
-type CredentialOptions struct {
+//
+// Deliberately a package-private near-duplicate of
+// vpnprovider.RouteOptions rather than reusing that type directly:
+// this struct is IPRoyal's own wire representation (subject to
+// IPRoyal's rules, e.g. "requires Country" below), while RouteOptions
+// is the provider-agnostic contract every provider is handed. Keeping
+// them distinct means IPRoyal-specific caveats can be documented here,
+// on IPRoyal's own type, without leaking into the interface every
+// other provider implements too.
+type credentialOptions struct {
 	Country     string // e.g. "us", or "dk,it,ie" for a random pick among several
 	City        string // requires Country
 	State       string // US only
@@ -21,11 +30,11 @@ type CredentialOptions struct {
 	ForceRandom bool   // expands location pool, reduces rotation frequency
 }
 
-// BuildPassword appends opts' IPRoyal targeting keys to basePassword in
+// buildPassword appends opts' IPRoyal targeting keys to basePassword in
 // their documented order: country, city, state, isp, region,
 // geolocation, session+lifetime, forcerandom. Empty fields are omitted
 // entirely rather than emitted as "_key-".
-func BuildPassword(basePassword string, opts CredentialOptions) string {
+func buildPassword(basePassword string, opts credentialOptions) string {
 	var b strings.Builder
 	b.WriteString(basePassword)
 

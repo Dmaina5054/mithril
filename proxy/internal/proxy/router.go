@@ -1,37 +1,47 @@
 package proxy
 
 import (
+	"context"
 	"fmt"
+	"net"
 	"time"
 
 	"github.com/dmaina5054/mithril/proxy/config"
+	"github.com/dmaina5054/mithril/proxy/internal/vpnprovider"
 )
 
 // Router implements Resolver using routing.yaml's geo/session rules and
-// one profiles.yaml entry's base credentials. One Router per listening
+// one profiles.yaml entry's Provider. One Router per listening
 // port/profile (see main.go) — Handle/Serve don't change between
-// Phase 2's StaticResolver and this.
+// StaticResolver (used before Session B Phase 3 added routing) and
+// this, and haven't changed again since the vpnprovider plugin layer
+// replaced Router's direct IPRoyal dependency: Router now knows how to
+// turn a routing.yaml match into a provider-agnostic RouteOptions, and
+// nothing about IPRoyal specifically.
 type Router struct {
-	Profile config.Profile
-	Routing *config.RoutingConfig
-	// UpstreamAddr is a fixed IPRoyal entry node for now — Phase 1's
-	// EntryNodes() benchmarking isn't wired into automatic selection
-	// yet, that's follow-up work, not part of this phase's gate.
-	UpstreamAddr string
-	Sessions     *SessionStore
+	// Name is the profile name (profiles.yaml's map key) — used only as
+	// a session-store key prefix, never sent upstream or passed to
+	// Provider.
+	Name     string
+	Provider vpnprovider.Provider
+	Routing  *config.RoutingConfig
+	Sessions *SessionStore
 }
 
-func (r *Router) Resolve(target Target) (string, Credentials, error) {
-	if r.UpstreamAddr == "" {
-		return "", Credentials{}, fmt.Errorf("router: no upstream address configured for profile %q", r.Profile.Username)
+// Dial implements Resolver: matches target.Host against Routing,
+// resolves (and, for sticky rules, reuses) a session id, then hands
+// the resulting RouteOptions to Provider.Dial.
+func (r *Router) Dial(ctx context.Context, target Target, timeout time.Duration) (net.Conn, error) {
+	if r.Provider == nil {
+		return nil, fmt.Errorf("router: no provider configured for profile %q", r.Name)
 	}
 	if r.Routing == nil {
-		return "", Credentials{}, fmt.Errorf("router: no routing config loaded")
+		return nil, fmt.Errorf("router: no routing config loaded")
 	}
 
 	rule := r.Routing.Match(target.Host)
 
-	opts := CredentialOptions{
+	opts := vpnprovider.RouteOptions{
 		Country: rule.Country,
 		City:    rule.City,
 		State:   rule.State,
@@ -46,21 +56,26 @@ func (r *Router) Resolve(target Target) (string, Credentials, error) {
 		}
 		ttl, err := time.ParseDuration(lifetime)
 		if err != nil {
-			return "", Credentials{}, fmt.Errorf("router: invalid lifetime %q for host %q: %w", lifetime, target.Host, err)
+			return nil, fmt.Errorf("router: invalid lifetime %q for host %q: %w", lifetime, target.Host, err)
 		}
 
-		sessionKey := r.Profile.Username + "|" + target.Host
+		sessionKey := r.Name + "|" + target.Host
 		sessionID, err := r.Sessions.GetOrCreate(sessionKey, ttl)
 		if err != nil {
-			return "", Credentials{}, fmt.Errorf("router: %w", err)
+			return nil, fmt.Errorf("router: %w", err)
 		}
 		opts.SessionID = sessionID
 		opts.Lifetime = lifetime
 	}
-	// SessionRotating (or unset): no session/lifetime keys — IPRoyal's
-	// docs are explicit that randomize rotation needs nothing added.
+	// SessionRotating (or unset): no session/lifetime keys — providers
+	// that support rotation at all treat "no SessionID" as the signal.
 
-	password := BuildPassword(r.Profile.Password, opts)
+	dialCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 
-	return r.UpstreamAddr, Credentials{Username: r.Profile.Username, Password: password}, nil
+	conn, err := r.Provider.Dial(dialCtx, target.Host, target.Port, opts)
+	if err != nil {
+		return nil, fmt.Errorf("router: profile %q: provider %q: %w", r.Name, r.Provider.Name(), err)
+	}
+	return conn, nil
 }

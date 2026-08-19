@@ -2,7 +2,7 @@ Project: mithril-proxy v3
 
 Node: Minas Tirith (Debian 6.12.95+deb13-amd64)
 
-Role: SOCKS5 consumer proxy — client of IPRoyal residential proxies
+Role: SOCKS5 consumer proxy — client of IPRoyal residential proxies (default provider) via a pluggable internal/vpnprovider layer; see docs/diagrams/provider-plugin-architecture.md
 
 eBPF: cilium/ebpf library, BTF+CO-RE available, kernel 6.12
 

@@ -17,12 +17,21 @@
 // it that way). A BPF_CGROUP_INET4_CONNECT hook redirects configured
 // PIDs' outbound connections to a transparent listener here, which
 // recovers the true destination via an eBPF-populated correlation map
-// and relays through the matching profile — same Resolver/DialUpstream/
+// and relays through the matching profile — same Resolver/Provider/
 // Relay pipeline the SOCKS5 path uses, just without a SOCKS5 handshake.
 // eBPF failure is non-fatal for all three eBPF features — the core
 // SOCKS5 proxy keeps running without them (e.g. missing CAP_BPF, kernel
 // too old); an observability or enforcement gap shouldn't take down
 // request forwarding.
+//
+// Provider plugin layer: main.go no longer talks to IPRoyal directly.
+// Each profile is backed by an internal/vpnprovider.Provider, looked up
+// by name (profiles.yaml's `provider` field, default "iproyal") from
+// the registry populated by this file's blank imports below. Adding
+// support for a different upstream VPN/proxy vendor means writing a new
+// internal/vpnprovider/<name> package and blank-importing it here —
+// nothing else in this file, or in internal/proxy, needs to change. See
+// docs/diagrams/provider-plugin-architecture.md.
 package main
 
 import (
@@ -42,6 +51,14 @@ import (
 	"github.com/dmaina5054/mithril/proxy/ebpf/zfs"
 	"github.com/dmaina5054/mithril/proxy/internal/metrics"
 	"github.com/dmaina5054/mithril/proxy/internal/proxy"
+	"github.com/dmaina5054/mithril/proxy/internal/vpnprovider"
+
+	// Provider plugins — blank-imported for their init() registration
+	// (see internal/vpnprovider.Register). This is the only place a new
+	// provider package needs to be wired in; profiles.yaml selects one
+	// by the name it registers under.
+	_ "github.com/dmaina5054/mithril/proxy/internal/vpnprovider/genericsocks5"
+	_ "github.com/dmaina5054/mithril/proxy/internal/vpnprovider/iproyal"
 )
 
 func main() {
@@ -52,13 +69,12 @@ func main() {
 	profilesPath := envOrDefault("MITHRIL_PROFILES_CONFIG", "/etc/socks5-proxy/profiles.yaml")
 	// Fixed entry node for now — Phase 1's EntryNodes() benchmarking
 	// isn't wired into automatic startup/6h re-selection yet. Follow-up,
-	// not part of Phase 3's gate (routing.yaml pattern matching).
+	// not part of Phase 3's gate (routing.yaml pattern matching). Only
+	// consulted as a fallback for profiles using a provider that needs
+	// a fixed upstream address (iproyal, socks5) and don't set their
+	// own upstream_addr — see buildProvider. Not required at all for a
+	// provider with no such concept, so no longer validated up front.
 	upstreamAddr := os.Getenv("MITHRIL_UPSTREAM_ADDR")
-
-	if upstreamAddr == "" {
-		fmt.Fprintln(os.Stderr, "mithril-proxy: MITHRIL_UPSTREAM_ADDR must be set (an IPRoyal entry node host:port — automatic selection isn't wired up yet)")
-		os.Exit(1)
-	}
 
 	routing, err := config.LoadRoutingConfig(routingPath)
 	if err != nil {
@@ -73,7 +89,7 @@ func main() {
 	startSNIFilter(ctx)
 	startZFSKprobe(ctx)
 
-	sessions := proxy.NewSessionStore() // shared across profiles — session keys are profile-username-prefixed, no collision risk
+	sessions := proxy.NewSessionStore() // shared across profiles — session keys are profile-name-prefixed, no collision risk
 
 	// SortedNames gives deterministic profile index assignment — the
 	// SAME ordering startRedirectEnforcement uses to populate
@@ -92,15 +108,20 @@ func main() {
 			log.Fatalf("mithril-proxy: profile %q: listen on %s: %v", name, listenAddr, err)
 		}
 
+		provider, err := buildProvider(name, p, upstreamAddr)
+		if err != nil {
+			log.Fatalf("mithril-proxy: %v", err)
+		}
+
 		router := &proxy.Router{
-			Profile:      p,
-			Routing:      routing,
-			UpstreamAddr: upstreamAddr,
-			Sessions:     sessions,
+			Name:     name,
+			Provider: provider,
+			Routing:  routing,
+			Sessions: sessions,
 		}
 		resolvers[uint8(i)] = router
 
-		log.Printf("mithril-proxy: profile %q (index %d) listening on %s, upstream %s", name, i, listenAddr, upstreamAddr)
+		log.Printf("mithril-proxy: profile %q (index %d) listening on %s, provider %q", name, i, listenAddr, provider.Name())
 		started++
 		go func(ln net.Listener, router *proxy.Router) {
 			errCh <- proxy.Serve(ln, router)
@@ -332,6 +353,50 @@ type redirectLookupAdapter struct {
 func (a redirectLookupAdapter) LookupOriginalDest(localPort uint16) (net.IP, uint16, uint8, bool, error) {
 	dest, found, err := a.tracker.LookupOriginalDest(localPort)
 	return dest.IP, dest.Port, dest.ProfileIndex, found, err
+}
+
+// buildProvider constructs profile p's vpnprovider.Provider by name
+// (p.Provider, default "iproyal") via the plugin registry.
+//
+// If p.ProviderConfig is set, it's passed through to the provider
+// factory verbatim — the modern, provider-agnostic path, used by any
+// profile naming a provider other than the default. If it's unset,
+// this synthesizes a config map from the profile's legacy top-level
+// username/password/subuser_hash/upstream_addr fields (falling back to
+// globalUpstreamAddr for upstream_addr) — the exact shape a
+// pre-plugin-layer profiles.yaml already had, so those files keep
+// working unmodified against the "iproyal" provider without ever
+// mentioning `provider` or `provider_config`.
+func buildProvider(profileName string, p config.Profile, globalUpstreamAddr string) (vpnprovider.Provider, error) {
+	name := p.Provider
+	if name == "" {
+		name = "iproyal"
+	}
+
+	cfg := p.ProviderConfig
+	if cfg == nil {
+		cfg = map[string]any{
+			"username":      p.Username,
+			"password":      p.Password,
+			"subuser_hash":  p.SubuserHash,
+			"upstream_addr": firstNonEmpty(p.UpstreamAddr, globalUpstreamAddr),
+		}
+	}
+
+	provider, err := vpnprovider.New(name, cfg)
+	if err != nil {
+		return nil, fmt.Errorf("profile %q: %w", profileName, err)
+	}
+	return provider, nil
+}
+
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 func envOrDefault(key, def string) string {

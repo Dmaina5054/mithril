@@ -1,11 +1,34 @@
 package proxy
 
 import (
-	"strings"
+	"context"
+	"net"
 	"testing"
+	"time"
 
 	"github.com/dmaina5054/mithril/proxy/config"
+	"github.com/dmaina5054/mithril/proxy/internal/vpnprovider"
 )
+
+// fakeProvider is a vpnprovider.Provider test double that records every
+// RouteOptions it's asked to Dial with. Router tests assert on those
+// recorded options directly instead of reverse-engineering routing
+// decisions from an upstream-specific credential string — this package
+// no longer knows or cares that IPRoyal encodes targeting into a
+// password suffix; that's entirely internal/vpnprovider/iproyal's
+// concern now.
+type fakeProvider struct {
+	calls []vpnprovider.RouteOptions
+}
+
+func (f *fakeProvider) Name() string { return "fake" }
+
+func (f *fakeProvider) Dial(_ context.Context, _ string, _ uint16, opts vpnprovider.RouteOptions) (net.Conn, error) {
+	f.calls = append(f.calls, opts)
+	client, server := net.Pipe()
+	server.Close()
+	return client, nil
+}
 
 func TestRouter_StickyRuleAddsSessionAndReuses(t *testing.T) {
 	routing := &config.RoutingConfig{
@@ -14,40 +37,45 @@ func TestRouter_StickyRuleAddsSessionAndReuses(t *testing.T) {
 		},
 		Default: config.RoutingRule{Session: config.SessionRotating},
 	}
+	provider := &fakeProvider{}
 	r := &Router{
-		Profile:      config.Profile{Username: "kioolabs", Password: "basepass"},
-		Routing:      routing,
-		UpstreamAddr: "upstream.example:1080",
-		Sessions:     NewSessionStore(),
+		Name:     "kioo-labs",
+		Provider: provider,
+		Routing:  routing,
+		Sessions: NewSessionStore(),
 	}
 
 	target := Target{Host: "api.comfy.example.com", Port: 443}
 
-	addr, creds, err := r.Resolve(target)
-	if err != nil {
-		t.Fatalf("Resolve: %v", err)
+	if conn, err := r.Dial(context.Background(), target, time.Second); err != nil {
+		t.Fatalf("Dial: %v", err)
+	} else {
+		conn.Close()
 	}
-	if addr != "upstream.example:1080" {
-		t.Errorf("addr = %q, want upstream.example:1080", addr)
-	}
-	if creds.Username != "kioolabs" {
-		t.Errorf("Username = %q, want kioolabs (profile username is never modified)", creds.Username)
-	}
-	if !strings.Contains(creds.Password, "_country-us") {
-		t.Errorf("password %q missing _country-us", creds.Password)
-	}
-	if !strings.Contains(creds.Password, "_lifetime-2h") {
-		t.Errorf("password %q missing _lifetime-2h", creds.Password)
+	// Second dial for the same host must reuse the same session id —
+	// that's the entire point of "sticky".
+	if conn, err := r.Dial(context.Background(), target, time.Second); err != nil {
+		t.Fatalf("Dial (2nd): %v", err)
+	} else {
+		conn.Close()
 	}
 
-	// Second resolve for the same host must reuse the same session id —
-	// that's the entire point of "sticky".
-	_, creds2, err := r.Resolve(target)
-	if err != nil {
-		t.Fatalf("Resolve (2nd): %v", err)
+	if len(provider.calls) != 2 {
+		t.Fatalf("got %d Dial calls, want 2", len(provider.calls))
 	}
-	if creds.Password != creds2.Password {
-		t.Errorf("sticky session password changed between calls:\n  1st: %s\n  2nd: %s", creds.Password, creds2.Password)
+	first, second := provider.calls[0], provider.calls[1]
+
+	if first.Country != "us" {
+		t.Errorf("Country = %q, want us", first.Country)
+	}
+	if first.Lifetime != "2h" {
+		t.Errorf("Lifetime = %q, want 2h", first.Lifetime)
+	}
+	if first.SessionID == "" {
+		t.Error("SessionID is empty for a sticky rule")
+	}
+	if first.SessionID != second.SessionID {
+		t.Errorf("sticky session id changed between calls: %q vs %q", first.SessionID, second.SessionID)
 	}
 }
 
@@ -58,22 +86,29 @@ func TestRouter_RotatingRuleOmitsSessionKeys(t *testing.T) {
 		},
 		Default: config.RoutingRule{Session: config.SessionRotating},
 	}
+	provider := &fakeProvider{}
 	r := &Router{
-		Profile:      config.Profile{Username: "kioolabs", Password: "basepass"},
-		Routing:      routing,
-		UpstreamAddr: "upstream.example:1080",
-		Sessions:     NewSessionStore(),
+		Name:     "kioo-labs",
+		Provider: provider,
+		Routing:  routing,
+		Sessions: NewSessionStore(),
 	}
 
-	_, creds, err := r.Resolve(Target{Host: "job.scrape.example.com", Port: 443})
+	conn, err := r.Dial(context.Background(), Target{Host: "job.scrape.example.com", Port: 443}, time.Second)
 	if err != nil {
-		t.Fatalf("Resolve: %v", err)
+		t.Fatalf("Dial: %v", err)
 	}
-	if strings.Contains(creds.Password, "_session-") || strings.Contains(creds.Password, "_lifetime-") {
-		t.Errorf("rotating rule should not add session/lifetime keys, got %q", creds.Password)
+	conn.Close()
+
+	if len(provider.calls) != 1 {
+		t.Fatalf("got %d Dial calls, want 1", len(provider.calls))
 	}
-	if !strings.Contains(creds.Password, "_country-us") {
-		t.Errorf("password %q missing _country-us", creds.Password)
+	got := provider.calls[0]
+	if got.SessionID != "" || got.Lifetime != "" {
+		t.Errorf("rotating rule should not set SessionID/Lifetime, got %+v", got)
+	}
+	if got.Country != "us" {
+		t.Errorf("Country = %q, want us", got.Country)
 	}
 }
 
@@ -81,33 +116,51 @@ func TestRouter_DifferentHostsGetDifferentStickySessions(t *testing.T) {
 	routing := &config.RoutingConfig{
 		Default: config.RoutingRule{Session: config.SessionSticky, Lifetime: "1h"},
 	}
+	provider := &fakeProvider{}
 	r := &Router{
-		Profile:      config.Profile{Username: "kioolabs", Password: "basepass"},
-		Routing:      routing,
-		UpstreamAddr: "upstream.example:1080",
-		Sessions:     NewSessionStore(),
+		Name:     "kioo-labs",
+		Provider: provider,
+		Routing:  routing,
+		Sessions: NewSessionStore(),
 	}
 
-	_, credsA, err := r.Resolve(Target{Host: "a.example.com", Port: 443})
+	connA, err := r.Dial(context.Background(), Target{Host: "a.example.com", Port: 443}, time.Second)
 	if err != nil {
-		t.Fatalf("Resolve a: %v", err)
+		t.Fatalf("Dial a: %v", err)
 	}
-	_, credsB, err := r.Resolve(Target{Host: "b.example.com", Port: 443})
+	connA.Close()
+	connB, err := r.Dial(context.Background(), Target{Host: "b.example.com", Port: 443}, time.Second)
 	if err != nil {
-		t.Fatalf("Resolve b: %v", err)
+		t.Fatalf("Dial b: %v", err)
 	}
-	if credsA.Password == credsB.Password {
+	connB.Close()
+
+	if len(provider.calls) != 2 {
+		t.Fatalf("got %d Dial calls, want 2", len(provider.calls))
+	}
+	if provider.calls[0].SessionID == provider.calls[1].SessionID {
 		t.Error("different destination hosts got the same sticky session — sessions should be keyed per host")
 	}
 }
 
-func TestRouter_NoUpstreamConfigured(t *testing.T) {
+func TestRouter_NoProviderConfigured(t *testing.T) {
 	r := &Router{
-		Profile:  config.Profile{Username: "u", Password: "p"},
+		Name:     "default",
 		Routing:  &config.RoutingConfig{Default: config.RoutingRule{Session: config.SessionRotating}},
 		Sessions: NewSessionStore(),
 	}
-	if _, _, err := r.Resolve(Target{Host: "x.example.com", Port: 443}); err == nil {
-		t.Fatal("expected error with no UpstreamAddr configured, got nil")
+	if _, err := r.Dial(context.Background(), Target{Host: "x.example.com", Port: 443}, time.Second); err == nil {
+		t.Fatal("expected error with no Provider configured, got nil")
+	}
+}
+
+func TestRouter_NoRoutingConfigured(t *testing.T) {
+	r := &Router{
+		Name:     "default",
+		Provider: &fakeProvider{},
+		Sessions: NewSessionStore(),
+	}
+	if _, err := r.Dial(context.Background(), Target{Host: "x.example.com", Port: 443}, time.Second); err == nil {
+		t.Fatal("expected error with no Routing configured, got nil")
 	}
 }
