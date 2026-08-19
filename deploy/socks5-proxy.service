@@ -1,0 +1,31 @@
+[Unit]
+Description=Mithril SOCKS5 consumer proxy (pluggable VPN/residential-proxy provider)
+Documentation=https://github.com/Dmaina5054/mithril
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/socks5-proxy/env
+ExecStart=/usr/local/bin/mithril-proxy
+Restart=on-failure
+RestartSec=5
+
+# Runs as root (no User= override): the proxy's eBPF features
+# (sock_ops bandwidth accounting, the SNI socket filter, connect4
+# traffic-redirect enforcement, ZFS kprobes) all need CAP_BPF/
+# CAP_SYS_ADMIN-class privileges to load and attach — see
+# proxy/main.go's startEBPF/startSNIFilter/startRedirectEnforcement/
+# startZFSKprobe doc comments. Every one of those features is
+# explicitly non-fatal on failure (missing privilege, missing kernel
+# support, ZFS not loaded, ...) — the core SOCKS5 proxy keeps running
+# without them either way. A tighter AmbientCapabilities= grant instead
+# of running as root is possible but NOT attempted here: this project's
+# eBPF programs have not been live-verified against systemd's exact
+# capability-bounding-set behavior (as opposed to a plain root process),
+# so getting the capability list wrong would silently degrade features
+# that already degrade gracefully — not worth the added complexity
+# without a way to verify it actually works.
+
+[Install]
+WantedBy=multi-user.target
