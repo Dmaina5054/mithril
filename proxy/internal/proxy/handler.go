@@ -8,6 +8,8 @@ import (
 	"net"
 	"syscall"
 	"time"
+
+	"github.com/dmaina5054/mithril/proxy/internal/metrics"
 )
 
 // SNIFilter, if set (by main.go, after successfully loading the eBPF
@@ -90,6 +92,7 @@ func Handle(conn net.Conn, resolver Resolver) {
 	target, err := ServerHandshake(conn)
 	if err != nil {
 		log.Printf("mithril-proxy: handshake error from %s: %v", conn.RemoteAddr(), err)
+		metrics.RecordConnectionError("handshake")
 		conn.Close()
 		return
 	}
@@ -97,6 +100,7 @@ func Handle(conn net.Conn, resolver Resolver) {
 	upstream, err := resolver.Dial(context.Background(), target, DialTimeout)
 	if err != nil {
 		log.Printf("mithril-proxy: upstream dial error for %s: %v", target.Addr(), err)
+		metrics.RecordConnectionError("dial")
 		_ = writeReply(conn, replyGeneralFailure)
 		conn.Close()
 		return
@@ -104,6 +108,7 @@ func Handle(conn net.Conn, resolver Resolver) {
 
 	if err := writeReply(conn, replySuccess); err != nil {
 		log.Printf("mithril-proxy: reply write error for %s: %v", target.Addr(), err)
+		metrics.RecordConnectionError("reply")
 		conn.Close()
 		upstream.Close()
 		return
@@ -126,6 +131,7 @@ func HandleTransparent(conn net.Conn, target Target, resolver Resolver) {
 	upstream, err := resolver.Dial(context.Background(), target, DialTimeout)
 	if err != nil {
 		log.Printf("mithril-proxy: (transparent) upstream dial error for %s: %v", target.Addr(), err)
+		metrics.RecordConnectionError("dial")
 		conn.Close()
 		return
 	}
