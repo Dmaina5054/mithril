@@ -1,0 +1,50 @@
+name: proxy CI
+
+on:
+  push:
+    branches: [staging, main]
+  pull_request:
+    paths:
+      - "proxy/**"
+      - ".github/workflows/proxy-ci.yml"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: proxy
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: proxy/go.mod
+          cache-dependency-path: proxy/go.sum
+
+      # bpf2go's default C compiler ("-cc clang") and default strip
+      # tool ("llvm-strip") — clang is preinstalled on ubuntu-latest
+      # runners, llvm-strip comes from the "llvm" package. bpftool is
+      # deliberately NOT installed: none of this repo's go:generate
+      # directives need it (clang alone produces the BTF the CO-RE
+      # programs need; bpftool would only matter for a vmlinux BTF dump
+      # step this project doesn't do), and proxy/Makefile's own PATH
+      # additions for it are defensive documentation, not a real build
+      # dependency, per this workflow's testing.
+      - name: Install eBPF build tools (clang, llvm-strip)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends clang llvm
+
+      - name: gofmt
+        run: test -z "$(gofmt -l .)"
+
+      - name: go generate (regenerate gitignored eBPF bindings)
+        run: go generate ./...
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go build
+        run: go build ./...
+
+      - name: go test -race
+        run: go test -race ./...
