@@ -5,7 +5,7 @@
 # by the `provider` field (default "iproyal" if omitted). See
 # docs/diagrams/provider-plugin-architecture.md for how the plugin
 # layer works, and main.go for which provider packages are compiled in
-# ("iproyal", "socks5" as of this writing).
+# ("iproyal", "socks5", "brightdata" as of this writing).
 profiles:
   # Legacy shape — no `provider` field at all. Assumed to be "iproyal",
   # with username/password/subuser_hash/upstream_addr read straight off
@@ -52,3 +52,27 @@ profiles:
     provider_config:
       upstream_addr: "127.0.0.1:9050" # Tor's default SOCKS5 port
       # username/password omitted — Tor's SOCKS5 port takes no auth
+
+  # A real third-party residential-proxy vendor — internal/vpnprovider/
+  # brightdata — added to prove the plugin layer against a provider
+  # whose credential scheme is the OPPOSITE shape of IPRoyal's:
+  # geo/session targeting goes in the USERNAME
+  # ("brd-customer-<id>-zone-<zone>-country-us-session-<id>"), the
+  # password is sent completely unmodified, and the upstream is a
+  # fixed vendor host (brd.superproxy.io:22228 for SOCKS5), not a
+  # per-account entry node. See internal/vpnprovider/brightdata's
+  # package doc comment for the exact docs.brightdata.com pages this
+  # was confirmed against, including two real constraints Bright
+  # Data's SOCKS5 endpoint enforces that this provider validates
+  # up front: target ports must be > 1024, and targets must be domain
+  # names (IP-literal targets are rejected upstream).
+  scrape-eu:
+    provider: brightdata
+    listen_port: 1083
+    provider_config:
+      customer_id: "<ACCOUNT_ID, from Bright Data's Access Details>"
+      zone: "<PROXY_NAME/ZONE_NAME, set once at zone creation>"
+      password: "<zone password, from Access Details>"
+      # upstream_addr: override brd.superproxy.io:22228 — leave unset
+      #   in production, exists mainly for testing against a fake
+      #   upstream.
