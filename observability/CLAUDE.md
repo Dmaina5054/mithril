@@ -4,7 +4,7 @@ Stack: Prometheus + Grafana via Docker Compose
 
 Prometheus: localhost-only (:9090), 90d retention
 
-Grafana: Tailscale-accessible (:3000), provisioned as-code
+Grafana: Tailscale-accessible (:3001 — moved off 3000, which belongs to the Hermes WhatsApp bridge), provisioned as-code
 
 Auth: GF_SECURITY_ADMIN_USER=daniel, password from .env
 
